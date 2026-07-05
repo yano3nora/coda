@@ -23,6 +23,17 @@ static INSTALL_SIGNAL_HANDLERS: Once = Once::new();
 static SIGNAL_RESTORE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SIGNAL_RESTORE_FD: AtomicI32 = AtomicI32::new(-1);
 static mut SIGNAL_RESTORE_TERMIOS: MaybeUninit<Termios> = MaybeUninit::uninit();
+static KEYBOARD_PROTOCOL_PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// kitty keyboard protocol: pop the flags we pushed (`CSI < u`).
+const KITTY_POP: &[u8] = b"\x1b[<u";
+
+/// Tracks whether a kitty protocol mode was pushed, so the signal handler can
+/// pop it before exiting. Leaving the mode pushed would corrupt the shell's
+/// key handling after an abnormal exit.
+pub(crate) fn set_keyboard_protocol_pushed(pushed: bool) {
+    KEYBOARD_PROTOCOL_PUSHED.store(pushed, Ordering::SeqCst);
+}
 
 /// Restores the original terminal attributes when dropped.
 #[derive(Debug)]
@@ -109,7 +120,12 @@ fn disarm_signal_restore() {
 }
 
 extern "C" fn restore_then_exit(signal_number: libc::c_int) {
-    // Only async-signal-safe calls are allowed here (tcsetattr / _exit are).
+    // Only async-signal-safe calls are allowed here (write / tcsetattr / _exit are).
+    if KEYBOARD_PROTOCOL_PUSHED.load(Ordering::SeqCst) {
+        unsafe {
+            libc::write(1, KITTY_POP.as_ptr().cast(), KITTY_POP.len());
+        }
+    }
     if SIGNAL_RESTORE_ACTIVE.load(Ordering::SeqCst) {
         let fd = SIGNAL_RESTORE_FD.load(Ordering::SeqCst);
         if fd >= 0 {

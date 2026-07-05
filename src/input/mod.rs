@@ -28,9 +28,19 @@ pub fn inspect_key() -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     let mut buffer = [0_u8; 128];
 
+    // Opt in to the kitty keyboard protocol "disambiguate" mode for this
+    // session and immediately query the active flags. A supporting terminal
+    // answers with `CSI ? <flags> u`, which shows up as the first input line —
+    // that reply doubles as a visible capability probe for the user.
+    let _protocol = KeyboardProtocolGuard::push(&mut stdout)?;
+
     write_raw_line(
         &mut stdout,
         "inspect-key: press keys to show raw bytes. Ctrl+C or Ctrl+D exits.",
+    )?;
+    write_raw_line(
+        &mut stdout,
+        "kitty keyboard protocol requested. A \\x1b[?..u line below means your terminal supports it.",
     )?;
 
     loop {
@@ -51,6 +61,33 @@ pub fn inspect_key() -> io::Result<()> {
             write_raw_line(&mut stdout, "exit")?;
             return Ok(());
         }
+    }
+}
+
+/// Pushes kitty keyboard protocol flags for its lifetime and pops them on drop.
+///
+/// Terminals that do not support the protocol ignore these sequences, so this
+/// is safe to emit unconditionally (progressive enhancement, ADR-0003).
+struct KeyboardProtocolGuard;
+
+impl KeyboardProtocolGuard {
+    /// `CSI > 1 u`: push "disambiguate escape codes" onto the terminal's
+    /// keyboard mode stack, then `CSI ? u`: query the resulting flags.
+    fn push(stdout: &mut impl Write) -> io::Result<Self> {
+        stdout.write_all(b"\x1b[>1u\x1b[?u")?;
+        stdout.flush()?;
+        raw_terminal::set_keyboard_protocol_pushed(true);
+        Ok(Self)
+    }
+}
+
+impl Drop for KeyboardProtocolGuard {
+    fn drop(&mut self) {
+        // `CSI < u`: pop our pushed mode so the shell keeps normal input.
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(b"\x1b[<u");
+        let _ = stdout.flush();
+        raw_terminal::set_keyboard_protocol_pushed(false);
     }
 }
 
