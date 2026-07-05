@@ -1,0 +1,92 @@
+# ADR-0007: Modifier Delivery Strategy (Cmd / per-terminal quirks)
+
+- Status: Proposed
+- Date: 2026-07-05
+
+## Context
+
+macOS の VS Code 筋肉記憶は Cmd 中心であり、Cmd が terminal に届くかどうかは製品価値に直結する。Ghostty 1.3.1 での実測(2026-07-05)で以下が判明した。
+
+- `Cmd+S` は kitty keyboard protocol の super modifier として届く(CSI u, modifier bit 8)
+- `Cmd+Shift+P` は届かない(Ghostty 自身の command palette が同キーを消費していることを確認)
+- `Ctrl+Shift+J` は正しく区別されて届く
+- `Shift+<文字>` は修飾情報が文字に畳み込まれて届く(protocol の仕様どおり。損失ではない)
+
+ここから得られた設計上の重要な事実:
+
+> **「届かない組み合わせ」は protocol 照会では検出できない。** terminal は予約キーを申告せず、ただ送ってこないだけである。よって capability 検出の自動化には原理的な限界がある。
+
+また、副次的な原則も得られた:
+
+> **GUI アプリで有名なキーほど、terminal を内包する GUI shell に消費されやすい。**`Ctrl+Shift+P` / `Cmd+Shift+P` は Ghostty・VS Code integrated terminal 自身の palette キーであり、TUI アプリの default にしてはならない(SPEC-0002 の palette キーを `Ctrl+Space` に変更した根拠)。
+
+## Decision
+
+### 1. super(Cmd / Win)は first-class modifier とする
+
+normalized key event は ctrl / alt / shift / super を保持する(実装済み。SPEC-0003)。
+
+### 2. Deliverability の判定は三層で行う
+
+| 層 | 手段 | 分かること |
+| --- | --- | --- |
+| (a) 自動 | protocol negotiation(CSI ?u 照会) | protocol 対応の有無、有効 flags |
+| (b) 知識 | 既知 terminal の quirk 情報(`TERM_PROGRAM` ベース) | 予約キーの警告(例: Ghostty の `Cmd+Shift+P`) |
+| (c) 実測 | `keymap verify`(対話的検証) | **個々の chord が実際に届くか(真実はここ)** |
+
+- (b) は警告のみに使い、小さく保つ(quirk DB の網羅を目指さない)
+- (c) は import した binding の chord を利用者に実際に押してもらい、届いたかを記録する。inspect-key の仕組みを binding 検証に転用する
+
+### 3. Import に cmd 戦略オプションを設ける
+
+```sh
+<app> keymap import vscode <path> --cmd=keep|ctrl|both
+```
+
+- `keep`(default): `cmd+s` をそのまま super binding として取り込む。verify を推奨する
+- `ctrl`: `cmd+*` を `ctrl+*` に変換して取り込む。VS Code 自身が公式に持つ macOS / Windows keymap 対応に基づく変換とし、変換後の衝突は conflict として report する
+- `both`: 両方登録する(衝突は report)
+
+super が届かない terminal では report で `ctrl` 変換を提案する。
+
+### 4. 原理的に取り返せないキーは最初から「移植不能」枠
+
+`Cmd+Q`(アプリ終了)、`Cmd+Tab`(OS)等は capability に関わらず `Unsupported: OS/terminal reserved` として report する。
+
+### 5. Terminal 側設定の生成支援(将来)
+
+Ghostty の `keybind` 等、予約キーを明け渡す設定 snippet の生成は deferred(SPEC-0001)。MVP では report と手順ドキュメントで案内する。
+
+## Alternatives Considered
+
+- **quirk DB を主軸にする**: terminal × バージョン × 設定の組み合わせは網羅不能で、保守が破綻する。DB は警告用の補助に留め、実測(verify)を真実とする。
+- **cmd を常に ctrl へ変換する**: Ghostty 実測で super が届くと分かった以上、届く環境で筋肉記憶を捨てさせる理由がない。戦略はユーザー選択にする。
+- **verify を作らず「押しても反応しない」に任せる**: 「キーが黙って効かない」は本製品が最も否定する体験(ADR-0001 Explicit incompatibility)。不採用。
+
+## Consequences
+
+### 良くなること
+
+- 「あなたの環境でこの binding は届かない」を、推測ではなく実測で言える
+- モダン terminal ユーザー(主要ターゲット)は Cmd 筋肉記憶をほぼ持ち込める
+- 非対応環境にも `--cmd=ctrl` という確立された退路がある
+
+### リスク・コスト
+
+- `keymap verify` という新しい対話フローの実装・UX コスト
+- verify 結果の保存(chord 単位の deliverability)という状態が増える
+- quirk 情報は少数でも陳腐化する(バージョン明記で緩和)
+
+## Migration Notes
+
+SPEC-0003(deliverability の非可査性)、SPEC-0004(--cmd オプション、reserved 分類)、SPEC-0005(`keymap verify` コマンド)を本 ADR に合わせて更新する。
+
+## Open Questions
+
+- Ghostty で `Cmd+Shift+P` 以外の Cmd+Shift 組み合わせが届くか(予約キー個別問題か、Cmd+Shift 全般問題か)— 実測待ち
+- verify 結果の保存形式・場所(`~/.config/<app>/` 配下)と、terminal が変わったときの無効化条件(`TERM_PROGRAM` + version をキーにする等)
+- verify を import フローに組み込むか(import 直後に「5 個の binding が未検証です。今すぐ verify しますか」)
+
+## Progress
+
+- 2026-07-05: Ghostty 1.3.1 実測に基づき初版作成(Proposed)。super modifier の decode 保持は実装済み。

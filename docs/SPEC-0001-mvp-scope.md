@@ -66,7 +66,7 @@ ADR-0001 の Non-goals に加え、MVP では以下を実装しない。
 
 ### Command Palette
 
-- `F1`(常時有効)/ `Ctrl+Shift+p`(capability がある terminal)で開く
+- `F1`(常時有効)/ `Ctrl+Space`(default。config で変更可)で開く
 - 全 EditorAction をインクリメンタルサーチして実行できる
 - 各 command に現在 bind されている key を併記する
 - save / quit / help / inspect-key を含む全操作の代替経路であり、shortcut を覚えていなくても操作が完結する

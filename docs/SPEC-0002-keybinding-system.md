@@ -81,15 +81,16 @@ overlay 表示中に overlay 用 binding が優先されるのは、規則 4 の
 
 rescue は「例外ショートカットの集合」ではなく、**command palette という単一の入口**で提供する。
 
-| Key            | Action                          | 保証                                     |
-| -------------- | ------------------------------- | ---------------------------------------- |
-| `F1`           | command palette open            | 常に有効(keymap resolver より前で処理) |
-| `Ctrl+Shift+p` | command palette open            | modifier 区別可能な terminal のみ        |
-| `Esc`          | close overlay / cancel sequence | overlay 表示中・sequence 待機中のみ有効  |
+| Key          | Action                          | 保証                                                 |
+| ------------ | ------------------------------- | ---------------------------------------------------- |
+| `F1`         | command palette open            | 常に有効(keymap resolver より前で処理)             |
+| `Ctrl+Space` | command palette open            | 全 terminal で受信可能(legacy では NUL 0x00)。config で変更可 |
+| `Esc`        | close overlay / cancel sequence | overlay 表示中・sequence 待機中のみ有効              |
 
 - palette からは save / save as / quit / buffer close / help / inspect-key / which-key を含む**全 EditorAction** をインクリメンタルサーチして実行できる
 - `F1` は legacy escape sequence として全 terminal で受信可能なため、**保証された rescue 入口**とする。keymap resolver を経由せず input decoder 直後に処理し、resolver や設定が壊れていても必ず開く
-- `Ctrl+Shift+p` は fallback terminal では `Ctrl+p` と区別できないため(SPEC-0003)、capability がある場合のみ rescue として登録する
+- `Ctrl+Shift+P` / `Cmd+Shift+P` のような「GUI editor で有名な palette キー」は default にしない。terminal を内包する GUI shell(Ghostty 自身の palette、VS Code integrated terminal)がまさにそのキーを先に消費するため、TUI アプリには構造的に届きにくい(ADR-0007 の実測)
+- `Ctrl+Space` は legacy encoding でも NUL(0x00)として届くため fallback terminal でも失われない。ただし macOS の入力ソース切替(特に日本語入力ユーザー)や tmux の prefix 再割当と衝突しうるため、`config.toml` で変更可能にする。変更しても `F1` は常に残る
 - palette 内の各 command には、現在 bind されている key を併記する(発見性と「palette で覚えて shortcut に昇格する」導線)
 - これにより `Ctrl+c` / `Ctrl+s` / `Ctrl+q` / `Ctrl+g` は rescue から解放され、user / imported binding が自由に使える(`Ctrl+c` = copy 等)
 - `Ctrl+c` の SIGINT は raw mode で無効化し、通常の key として扱う
@@ -142,10 +143,11 @@ Source: imported:vscode
 ## Open Questions
 
 - `F1` すら受信できない・食われる環境(一部 multiplexer / OS shortcut)への最終手段。候補: `Ctrl+c` 連打(3 回)で force-quit prompt。過剰設計になるなら見送る
-- palette open key(`F1` / `Ctrl+Shift+p`)を config で変更可能にするか(rescue の「常に有効」保証と矛盾しない範囲で)
+- macOS の入力ソース切替(`Ctrl+Space`)が有効なユーザーへの案内(quirk 警告に含めるか)
 - 限定性(条件数)による優先は近似にすぎない。実運用で直感に反したら specificity の定義を見直す
 
 ## Progress
 
 - 2026-07-05: 初版。draft の優先度 5 層(rescue > overlay > user > imported > default)を「context filter + source 優先度 + 限定性」に整理(ADR-0002)。
 - 2026-07-05: rescue を「複数の例外ショートカット」から「command palette 単一入口(`F1` 保証)」に変更。`Ctrl+c` / `Ctrl+s` / `Ctrl+q` / `Ctrl+g` を user keymap に開放。
+- 2026-07-05: palette の便宜キーを `Ctrl+Shift+p` から `Ctrl+Space` に変更。Ghostty 実測で `Cmd+Shift+P` が Ghostty 自身の palette に消費されることを確認したため(GUI shell と有名キーを取り合わない方針。ADR-0007)。

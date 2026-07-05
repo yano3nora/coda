@@ -174,7 +174,8 @@ Examples:
 
 - `keybindings.json` が JSONC として parse 不能 → import を中断し、エラー位置を表示する。generated は変更しない
 - 同一 command の負値 binding(VS Code の `-command` 記法)→ MVP では `Unsupported command` として報告する
-- `cmd`(macOS)modifier → terminal で受信不能な場合は `Disabled by terminal capability` に分類する
+- `cmd`(macOS)modifier → `--cmd=keep|ctrl|both` 戦略に従って取り込む(ADR-0007)。super が受信不能な terminal では `Disabled by terminal capability` に分類し、`--cmd=ctrl` を提案する
+- `cmd+q` / `cmd+tab` 等の OS / terminal 予約キー → capability に関わらず `Unsupported: OS/terminal reserved` に分類する(ADR-0007)
 - 空の `keybindings.json` → 成功(Imported: 0)として report を出す
 
 ## API / Interface

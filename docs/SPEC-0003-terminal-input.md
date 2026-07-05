@@ -78,6 +78,12 @@ Resolved action: selection.cursorDown
 
 - inspector は MVP の最初期から提供する(実装順序 1 に対応。ADR-0004)
 
+### Deliverability の限界と `keymap verify`(ADR-0007)
+
+- terminal が予約・消費するキー(例: Ghostty の `Cmd+Shift+P`)は **protocol 照会では検出できない**。送られてこないだけであり、非対応と無入力を区別できない
+- そのため chord 単位の deliverability は `keymap verify`(対話的実測)で確定する: 対象 binding のキーを利用者に押してもらい、届いたかを記録する
+- quirk 情報(`TERM_PROGRAM` ベースの既知予約キー)は警告表示のみに使う
+
 ## Invariants
 
 - capability 検出の成否に関わらず、起動は常に成功する
