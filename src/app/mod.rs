@@ -3,6 +3,7 @@
 mod clipboard;
 mod config;
 mod default_bindings;
+mod document;
 mod editor_view;
 mod event_loop;
 mod file;
@@ -51,18 +52,11 @@ fn run_editor(paths: Vec<PathBuf>) -> i32 {
     }
 
     let mut warnings = Vec::new();
-    if paths.len() > 1 {
-        warnings.push(format!(
-            "multiple files are not implemented yet; opened {} only",
-            paths[0].display()
-        ));
-    }
-
     let loaded_config = config::load();
     warnings.extend(loaded_config.warnings);
 
-    match EventLoop::open(
-        paths[0].clone(),
+    match EventLoop::open_many(
+        paths,
         warnings,
         loaded_config.user_bindings,
         loaded_config.theme,
@@ -75,7 +69,7 @@ fn run_editor(paths: Vec<PathBuf>) -> i32 {
             }
         },
         Err(error) => {
-            eprintln!("failed to open {}: {error}", paths[0].display());
+            eprintln!("failed to open file: {error}");
             1
         }
     }

@@ -38,9 +38,10 @@ impl EditorView {
         screen: &mut Screen,
         highlights: &[Vec<HighlightSpan>],
         status: StatusLine<'_>,
+        origin_y: u16,
     ) {
         let gutter = Self::gutter_width(editor);
-        let editor_rows = screen.height().saturating_sub(1) as usize;
+        let editor_rows = screen.height().saturating_sub(origin_y + 1) as usize;
         let editor_cols = (screen.width() as usize).saturating_sub(gutter);
         self.ensure_cursor_visible(editor, editor_rows, editor_cols);
 
@@ -56,7 +57,7 @@ impl EditorView {
             };
             screen.put_str(
                 0,
-                row as u16,
+                origin_y + row as u16,
                 &format!("{:>width$} ", line_index + 1, width = gutter - 1),
                 number_style,
             );
@@ -64,7 +65,7 @@ impl EditorView {
                 screen,
                 line,
                 line_index,
-                row as u16,
+                origin_y + row as u16,
                 gutter as u16,
                 self.left_col,
                 editor.selection.map(|selection| selection.range()),
@@ -94,9 +95,9 @@ impl EditorView {
 
         if let Some((x, y)) = self.cursor_screen_position(editor)
             && x < screen.width()
-            && y < screen.height().saturating_sub(1)
+            && origin_y + y < screen.height().saturating_sub(1)
         {
-            screen.set_cursor(x, y);
+            screen.set_cursor(x, origin_y + y);
         }
     }
 

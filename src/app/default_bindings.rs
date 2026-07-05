@@ -286,6 +286,15 @@ const DEFAULTS: &[(&str, EditorAction, Option<&str>, Source)] = &[
         Source::Default,
     ),
     ("ctrl+s", EditorAction::FileSave, None, Source::Default),
+    ("ctrl+tab", EditorAction::BufferNext, None, Source::Default),
+    (
+        "ctrl+shift+tab",
+        EditorAction::BufferPrevious,
+        None,
+        Source::Default,
+    ),
+    ("ctrl+w", EditorAction::BufferClose, None, Source::Default),
+    ("cmd+w", EditorAction::BufferClose, None, Source::Default),
     ("cmd+f", EditorAction::SearchOpen, None, Source::Default),
     (
         "cmd+alt+f",
@@ -391,6 +400,25 @@ mod tests {
             ("cmd+shift+g", EditorAction::SearchPrevious),
             ("f3", EditorAction::SearchNext),
             ("shift+f3", EditorAction::SearchPrevious),
+        ];
+
+        for (key, action) in cases {
+            assert_eq!(
+                resolver.resolve(&[key.parse().unwrap()], &EditorContext::default()),
+                ResolveResult::Matched(action),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn buffer_default_bindings_parse_and_resolve() {
+        let resolver = Resolver::new(bindings());
+        let cases = [
+            ("ctrl+tab", EditorAction::BufferNext),
+            ("ctrl+shift+tab", EditorAction::BufferPrevious),
+            ("ctrl+w", EditorAction::BufferClose),
+            ("cmd+w", EditorAction::BufferClose),
         ];
 
         for (key, action) in cases {
