@@ -1,0 +1,164 @@
+//! Editor action identifiers used by key bindings.
+//!
+//! These names are stable user-facing strings shared with import reports and the
+//! future command palette. Unknown names are errors so imports can explain loss.
+
+use std::{fmt, str::FromStr};
+
+/// A command that can be reached through the keymap or command palette.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum EditorAction {
+    CursorUp,
+    CursorDown,
+    CursorLeft,
+    CursorRight,
+    CursorWordLeft,
+    CursorWordRight,
+    CursorLineStart,
+    CursorLineEnd,
+    CursorPageUp,
+    CursorPageDown,
+    SelectionUp,
+    SelectionDown,
+    SelectionLeft,
+    SelectionRight,
+    SelectionWordLeft,
+    SelectionWordRight,
+    SelectionAll,
+    EditInsertLineAfter,
+    EditInsertLineBefore,
+    EditMoveLinesUp,
+    EditMoveLinesDown,
+    EditUndo,
+    EditRedo,
+    SearchOpen,
+    SearchNext,
+    SearchPrevious,
+    ReplaceOpen,
+    BufferNew,
+    BufferNext,
+    BufferPrevious,
+    BufferClose,
+    FileSave,
+    FileSaveAs,
+    ViewSplitVertical,
+    ViewFocusNextSplit,
+    ViewFocusPreviousSplit,
+    PaletteOpen,
+    AppQuit,
+    InspectorOpen,
+}
+
+impl EditorAction {
+    /// Canonical action name used in bindings and import reports.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CursorUp => "cursor.up",
+            Self::CursorDown => "cursor.down",
+            Self::CursorLeft => "cursor.left",
+            Self::CursorRight => "cursor.right",
+            Self::CursorWordLeft => "cursor.wordLeft",
+            Self::CursorWordRight => "cursor.wordRight",
+            Self::CursorLineStart => "cursor.lineStart",
+            Self::CursorLineEnd => "cursor.lineEnd",
+            Self::CursorPageUp => "cursor.pageUp",
+            Self::CursorPageDown => "cursor.pageDown",
+            Self::SelectionUp => "selection.up",
+            Self::SelectionDown => "selection.down",
+            Self::SelectionLeft => "selection.left",
+            Self::SelectionRight => "selection.right",
+            Self::SelectionWordLeft => "selection.wordLeft",
+            Self::SelectionWordRight => "selection.wordRight",
+            Self::SelectionAll => "selection.all",
+            Self::EditInsertLineAfter => "edit.insertLineAfter",
+            Self::EditInsertLineBefore => "edit.insertLineBefore",
+            Self::EditMoveLinesUp => "edit.moveLinesUp",
+            Self::EditMoveLinesDown => "edit.moveLinesDown",
+            Self::EditUndo => "edit.undo",
+            Self::EditRedo => "edit.redo",
+            Self::SearchOpen => "search.open",
+            Self::SearchNext => "search.next",
+            Self::SearchPrevious => "search.previous",
+            Self::ReplaceOpen => "replace.open",
+            Self::BufferNew => "buffer.new",
+            Self::BufferNext => "buffer.next",
+            Self::BufferPrevious => "buffer.previous",
+            Self::BufferClose => "buffer.close",
+            Self::FileSave => "file.save",
+            Self::FileSaveAs => "file.saveAs",
+            Self::ViewSplitVertical => "view.splitVertical",
+            Self::ViewFocusNextSplit => "view.focusNextSplit",
+            Self::ViewFocusPreviousSplit => "view.focusPreviousSplit",
+            Self::PaletteOpen => "palette.open",
+            Self::AppQuit => "app.quit",
+            Self::InspectorOpen => "inspector.open",
+        }
+    }
+}
+
+/// Error returned when a binding references an unknown action name.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ParseActionError(pub String);
+
+impl fmt::Display for ParseActionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "unknown editor action: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseActionError {}
+
+impl FromStr for EditorAction {
+    type Err = ParseActionError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "cursor.up" => Ok(Self::CursorUp),
+            "cursor.down" => Ok(Self::CursorDown),
+            "cursor.left" => Ok(Self::CursorLeft),
+            "cursor.right" => Ok(Self::CursorRight),
+            "cursor.wordLeft" => Ok(Self::CursorWordLeft),
+            "cursor.wordRight" => Ok(Self::CursorWordRight),
+            "cursor.lineStart" => Ok(Self::CursorLineStart),
+            "cursor.lineEnd" => Ok(Self::CursorLineEnd),
+            "cursor.pageUp" => Ok(Self::CursorPageUp),
+            "cursor.pageDown" => Ok(Self::CursorPageDown),
+            "selection.up" => Ok(Self::SelectionUp),
+            "selection.down" => Ok(Self::SelectionDown),
+            "selection.left" => Ok(Self::SelectionLeft),
+            "selection.right" => Ok(Self::SelectionRight),
+            "selection.wordLeft" => Ok(Self::SelectionWordLeft),
+            "selection.wordRight" => Ok(Self::SelectionWordRight),
+            "selection.all" => Ok(Self::SelectionAll),
+            "edit.insertLineAfter" => Ok(Self::EditInsertLineAfter),
+            "edit.insertLineBefore" => Ok(Self::EditInsertLineBefore),
+            "edit.moveLinesUp" => Ok(Self::EditMoveLinesUp),
+            "edit.moveLinesDown" => Ok(Self::EditMoveLinesDown),
+            "edit.undo" => Ok(Self::EditUndo),
+            "edit.redo" => Ok(Self::EditRedo),
+            "search.open" => Ok(Self::SearchOpen),
+            "search.next" => Ok(Self::SearchNext),
+            "search.previous" => Ok(Self::SearchPrevious),
+            "replace.open" => Ok(Self::ReplaceOpen),
+            "buffer.new" => Ok(Self::BufferNew),
+            "buffer.next" => Ok(Self::BufferNext),
+            "buffer.previous" => Ok(Self::BufferPrevious),
+            "buffer.close" => Ok(Self::BufferClose),
+            "file.save" => Ok(Self::FileSave),
+            "file.saveAs" => Ok(Self::FileSaveAs),
+            "view.splitVertical" => Ok(Self::ViewSplitVertical),
+            "view.focusNextSplit" => Ok(Self::ViewFocusNextSplit),
+            "view.focusPreviousSplit" => Ok(Self::ViewFocusPreviousSplit),
+            "palette.open" => Ok(Self::PaletteOpen),
+            "app.quit" => Ok(Self::AppQuit),
+            "inspector.open" => Ok(Self::InspectorOpen),
+            _ => Err(ParseActionError(value.to_string())),
+        }
+    }
+}
+
+impl fmt::Display for EditorAction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
