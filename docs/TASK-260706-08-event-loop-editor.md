@@ -61,22 +61,24 @@
 
 自動:
 
-- [ ] `drain_key_events`: `\x1b[1;5` + `C` の 2 回に分けた入力で `Ctrl+Right` が 1 個出る(chunk 跨ぎ)
-- [ ] `flush_pending_escape`: lone ESC が timeout で `Esc` になる
-- [ ] palette filter: `"sav"` で `file.save` / `file.saveAs` が残り、大文字入力でも一致する
-- [ ] default bindings 全 entry が parse エラーなく `Resolver` に載る
-- [ ] quit ガード: modified 状態の quit 1 回目 → 継続、2 回目 → 終了判定
-- [ ] `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` がすべて通る
+- [x] `drain_key_events`: `\x1b[1;5` + `C` の 2 回に分けた入力で `Ctrl+Right` が 1 個出る(chunk 跨ぎ)
+- [x] `flush_pending_escape`: lone ESC が timeout で `Esc` になる
+- [x] palette filter: `"sav"` で `file.save` / `file.saveAs` が残り、大文字入力でも一致する
+- [x] default bindings 全 entry が parse エラーなく `Resolver` に載る
+- [x] quit ガード: modified 状態の quit 1 回目 → 継続、2 回目 → 終了判定
+- [x] `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` がすべて通る
 
 手動(人間 + main agent の PTY smoke):
 
-- [ ] `cargo run -- /tmp/test.txt` で起動し、文字入力・矢印移動・`ctrl+s` 保存・`ctrl+q` 終了ができる
-- [ ] `F1` → palette が開き、`sav` 部分一致 → enter で保存される
+- [x] `cargo run -- /tmp/test.txt` で起動し、文字入力・矢印移動・`ctrl+s` 保存・`ctrl+q` 終了ができる
+- [x] `F1` → palette が開き、`sav` 部分一致 → enter で保存される
 - [ ] 日本語・絵文字を含む行でカーソル移動が乱れない
-- [ ] 未保存で `ctrl+q` → 警告が出て、もう一度で終了する
+- [x] 未保存で `ctrl+q` → 警告が出て、もう一度で終了する
 - [ ] 終了後に shell が乱れない(alt screen / raw mode / kitty protocol の復元)
 
 ## notes
+
+- main agent の PTY 検証済み (2026-07-06): 入力→Ctrl+S 保存→Ctrl+Q 終了、F1→palette→sav→Enter 保存、未保存 quit ガード (警告→2 回目で終了、ファイル無変更)、alt screen enter/leave の対応。日本語行のカーソル挙動と実 terminal の復元は人間の目視確認待ち
 
 - 新規依存 crate の追加は禁止
 - event loop は「状態を持つ薄い層」に徹し、判定ロジック(palette filter・quit ガード・pending 規則)はテスト可能な関数に切り出すこと

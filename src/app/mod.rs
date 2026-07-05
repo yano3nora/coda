@@ -1,13 +1,18 @@
-//! Application-level CLI routing and future event loop ownership.
+//! Application-level CLI routing and event-loop ownership.
+
+mod config;
+mod default_bindings;
+mod editor_view;
+mod event_loop;
+mod file;
+mod palette;
 
 use std::{env, ffi::OsString, path::PathBuf};
 
 use crate::input;
+use event_loop::EventLoop;
 
 /// Runs the CLI entrypoint and returns a process exit code.
-///
-/// This deliberately keeps argument handling minimal until SPEC-0005 subcommands
-/// are implemented. `inspect-key` is the only active command in this scaffold.
 pub fn run() -> i32 {
     match Command::parse(env::args_os().skip(1)) {
         Command::InspectKey => match input::inspect_key() {
@@ -17,20 +22,38 @@ pub fn run() -> i32 {
                 1
             }
         },
-        Command::OpenFiles(paths) => {
-            if paths.is_empty() {
-                println!("coda editor is not implemented yet. Try: coda inspect-key");
-            } else {
-                println!(
-                    "opening files is not implemented yet: {}",
-                    paths
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+        Command::OpenFiles(paths) => run_editor(paths),
+    }
+}
+
+fn run_editor(paths: Vec<PathBuf>) -> i32 {
+    if paths.is_empty() {
+        eprintln!("usage: coda <path> | coda inspect-key");
+        return 2;
+    }
+
+    let mut warnings = Vec::new();
+    if paths.len() > 1 {
+        warnings.push(format!(
+            "multiple files are not implemented yet; opened {} only",
+            paths[0].display()
+        ));
+    }
+
+    let loaded_config = config::load();
+    warnings.extend(loaded_config.warnings);
+
+    match EventLoop::open(paths[0].clone(), warnings, loaded_config.user_bindings) {
+        Ok(loop_) => match loop_.run() {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("editor failed: {error}");
+                1
             }
-            0
+        },
+        Err(error) => {
+            eprintln!("failed to open {}: {error}", paths[0].display());
+            1
         }
     }
 }
@@ -66,12 +89,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_no_args_as_not_implemented_open() {
+    fn parse_no_args_as_open_without_paths() {
         assert_eq!(Command::parse([]), Command::OpenFiles(vec![]));
     }
 
     #[test]
-    fn parse_paths_as_not_implemented_open() {
+    fn parse_paths_as_editor_open() {
         assert_eq!(
             Command::parse([OsString::from("a.txt"), OsString::from("b.txt")]),
             Command::OpenFiles(vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")])

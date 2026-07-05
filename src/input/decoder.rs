@@ -15,20 +15,53 @@ pub enum DecodeResult {
 
 /// Decodes a byte slice into normalized key events.
 pub fn decode_key_events(bytes: &[u8]) -> DecodeResult {
+    let mut pending = bytes.to_vec();
+    let events = drain_key_events(&mut pending);
+    if pending.is_empty() {
+        DecodeResult::Complete(events)
+    } else {
+        DecodeResult::Incomplete
+    }
+}
+
+/// Drains every complete key event from the front of a streaming byte buffer.
+///
+/// Terminal escape sequences often cross `read(2)` boundaries. This function
+/// consumes only fully decoded prefixes and intentionally keeps an incomplete
+/// suffix in `buffer` so the event loop can append the next chunk before
+/// trying again.
+pub fn drain_key_events(buffer: &mut Vec<u8>) -> Vec<KeyEvent> {
     let mut events = Vec::new();
     let mut offset = 0;
 
-    while offset < bytes.len() {
-        match decode_one(&bytes[offset..]) {
+    while offset < buffer.len() {
+        match decode_one(&buffer[offset..]) {
             One::Event(event, consumed) => {
                 events.push(event);
                 offset += consumed;
             }
-            One::Incomplete => return DecodeResult::Incomplete,
+            One::Incomplete => break,
         }
     }
 
-    DecodeResult::Complete(events)
+    if offset > 0 {
+        buffer.drain(..offset);
+    }
+    events
+}
+
+/// Converts a timed-out lone ESC byte into an `Esc` key event.
+///
+/// A single ESC is ambiguous with the prefix of many terminal sequences. The
+/// event loop calls this after its ESC timeout; any non-lone pending bytes are
+/// left untouched because they may still be a damaged or slow sequence.
+pub fn flush_pending_escape(buffer: &mut Vec<u8>) -> Option<KeyEvent> {
+    if buffer.as_slice() == [0x1b] {
+        buffer.clear();
+        Some(KeyEvent::plain(Key::Esc))
+    } else {
+        None
+    }
 }
 
 enum One {
@@ -242,8 +275,32 @@ fn legacy_modifiers(encoded: Option<u16>) -> Modifiers {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeResult, decode_key_events};
+    use super::{DecodeResult, decode_key_events, drain_key_events, flush_pending_escape};
     use crate::input::{Key, KeyEvent, Modifiers};
+
+    #[test]
+    fn drain_key_events_keeps_split_escape_sequence_until_complete() {
+        let mut buffer = b"\x1b[1;5".to_vec();
+        assert_eq!(drain_key_events(&mut buffer), Vec::new());
+        assert_eq!(buffer, b"\x1b[1;5");
+
+        buffer.extend_from_slice(b"C");
+        assert_eq!(
+            drain_key_events(&mut buffer),
+            vec![KeyEvent::new(Key::Right, Modifiers::ctrl())]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn flush_pending_escape_turns_lone_esc_into_event() {
+        let mut buffer = vec![0x1b];
+        assert_eq!(
+            flush_pending_escape(&mut buffer),
+            Some(KeyEvent::plain(Key::Esc))
+        );
+        assert!(buffer.is_empty());
+    }
 
     #[test]
     fn decode_required_key_event_cases() {

@@ -28,6 +28,10 @@ impl Resolver {
         Self { bindings }
     }
 
+    pub fn bindings(&self) -> &[Binding] {
+        &self.bindings
+    }
+
     pub fn resolve(&self, pending: &[KeyEvent], ctx: &EditorContext) -> ResolveResult {
         if pending.is_empty() {
             return ResolveResult::NoMatch;

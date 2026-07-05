@@ -10,7 +10,7 @@ pub(crate) mod raw_terminal;
 
 use std::io::{self, Read, Write};
 
-pub use decoder::{DecodeResult, decode_key_events};
+pub use decoder::{DecodeResult, decode_key_events, drain_key_events, flush_pending_escape};
 pub use key_event::{Key, KeyEvent, Modifiers};
 pub use raw_terminal::RawModeGuard;
 
@@ -68,12 +68,12 @@ pub fn inspect_key() -> io::Result<()> {
 ///
 /// Terminals that do not support the protocol ignore these sequences, so this
 /// is safe to emit unconditionally (progressive enhancement, ADR-0003).
-struct KeyboardProtocolGuard;
+pub struct KeyboardProtocolGuard;
 
 impl KeyboardProtocolGuard {
     /// `CSI > 1 u`: push "disambiguate escape codes" onto the terminal's
     /// keyboard mode stack, then `CSI ? u`: query the resulting flags.
-    fn push(stdout: &mut impl Write) -> io::Result<Self> {
+    pub fn push(stdout: &mut impl Write) -> io::Result<Self> {
         stdout.write_all(b"\x1b[>1u\x1b[?u")?;
         stdout.flush()?;
         raw_terminal::set_keyboard_protocol_pushed(true);
@@ -133,7 +133,7 @@ fn format_chunk(chunk: &[u8]) -> String {
     )
 }
 
-fn escape_bytes(bytes: &[u8]) -> String {
+pub fn escape_bytes(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|byte| match *byte {
