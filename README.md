@@ -1,18 +1,18 @@
 coda
 ===
 
-# Structure
+## Structure
 ```
 .
 ├ docs/                 … Design notes
 └ mise.toml             … Toolchain
 ```
 
-# Depends
+## Depends
 - mise 2026+
 
-# Development
-## Getting Started
+## Development
+### Getting Started
 ```sh
 # Uncomment required tools/tasks in mise.toml first.
 mise install
@@ -25,16 +25,16 @@ mise run provision
 npm start
 ```
 
-## Commands
+### Commands
 ```sh
 # install packages
 # fix / check lint, format
 # type check & test
 ```
 
-# Deployment
+## Deployment
 ```sh
 # deploy
 ```
 
-## Resources
+### Resources
