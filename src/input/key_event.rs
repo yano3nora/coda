@@ -35,9 +35,10 @@ pub enum Key {
 pub struct Modifiers(u8);
 
 impl Modifiers {
-    const CTRL: u8 = 0b001;
-    const ALT: u8 = 0b010;
-    const SHIFT: u8 = 0b100;
+    const CTRL: u8 = 0b0001;
+    const ALT: u8 = 0b0010;
+    const SHIFT: u8 = 0b0100;
+    const SUPER: u8 = 0b1000;
 
     pub const fn none() -> Self {
         Self(0)
@@ -67,6 +68,18 @@ impl Modifiers {
         Self(self.0 | Self::SHIFT)
     }
 
+    pub const fn super_key() -> Self {
+        Self(Self::SUPER)
+    }
+
+    pub const fn with_super(self) -> Self {
+        Self(self.0 | Self::SUPER)
+    }
+
+    pub const fn contains_super(self) -> bool {
+        self.0 & Self::SUPER != 0
+    }
+
     pub const fn contains_ctrl(self) -> bool {
         self.0 & Self::CTRL != 0
     }
@@ -81,18 +94,23 @@ impl Modifiers {
 
     pub(crate) const fn from_kitty_encoded(encoded: u16) -> Self {
         // kitty CSI u uses xterm-style encoding: value 1 means no modifiers,
-        // then bit 0=Shift, bit 1=Alt, bit 2=Ctrl. Extra bits are intentionally
-        // ignored for MVP because SPEC-0003 only exposes Ctrl/Alt/Shift.
+        // then bit 0=Shift, bit 1=Alt, bit 2=Ctrl, bit 3=Super (Cmd/Win).
+        // Super must be preserved: dropping it would decode Cmd+S as a plain
+        // "s" keystroke, silently corrupting input (forbidden by ADR-0003).
+        // Hyper/Meta and lock-key bits beyond Super stay ignored for MVP.
         let bits = encoded.saturating_sub(1);
         let mut result = Self::none();
-        if bits & 0b001 != 0 {
+        if bits & 0b0001 != 0 {
             result = result.with_shift();
         }
-        if bits & 0b010 != 0 {
+        if bits & 0b0010 != 0 {
             result = result.with_alt();
         }
-        if bits & 0b100 != 0 {
+        if bits & 0b0100 != 0 {
             result = result.with_ctrl();
+        }
+        if bits & 0b1000 != 0 {
+            result = result.with_super();
         }
         result
     }
@@ -117,6 +135,13 @@ impl KeyEvent {
 
 impl fmt::Display for KeyEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.modifiers.contains_super() {
+            // Label matches the key cap users know: Cmd on macOS, Super elsewhere.
+            #[cfg(target_os = "macos")]
+            formatter.write_str("Cmd+")?;
+            #[cfg(not(target_os = "macos"))]
+            formatter.write_str("Super+")?;
+        }
         if self.modifiers.contains_ctrl() {
             formatter.write_str("Ctrl+")?;
         }
@@ -155,7 +180,10 @@ impl fmt::Display for KeyEvent {
 }
 
 fn display_char(character: char, modifiers: Modifiers) -> char {
-    if (modifiers.contains_ctrl() || modifiers.contains_alt() || modifiers.contains_shift())
+    if (modifiers.contains_ctrl()
+        || modifiers.contains_alt()
+        || modifiers.contains_shift()
+        || modifiers.contains_super())
         && character.is_ascii_alphabetic()
     {
         character.to_ascii_uppercase()

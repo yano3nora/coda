@@ -298,6 +298,11 @@ mod tests {
                 complete([KeyEvent::new(Key::Enter, Modifiers::ctrl())]),
             ),
             (
+                "kitty CSI u Super+S is not a plain s",
+                b"\x1b[115;9u",
+                complete([KeyEvent::new(Key::Char('s'), Modifiers::super_key())]),
+            ),
+            (
                 "ESC prefix Alt+F",
                 b"\x1bf",
                 complete([KeyEvent::new(Key::Char('f'), Modifiers::alt())]),

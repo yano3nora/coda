@@ -42,6 +42,11 @@ type KeyboardCapabilities = {
 
 - keymap resolver / importer は protocol 名ではなく capability のみを参照する
 
+### Super(Cmd / Win)modifier
+
+- normalized key event は ctrl / alt / shift に加えて super を保持する。kitty CSI u の modifier bit 8 で受信でき、受信した場合に捨てると `Cmd+s` が素の `s` 入力に化けるため(Invariants 違反)、decode 段階では必ず保持する
+- ただし多くの terminal は Cmd / Win を自身のショートカットとして消費し、アプリまで届けない。super に依存する binding の有効 / 無効は capability 層で判定し、受信不能な環境では `Disabled by terminal capability` として report する(SPEC-0004)
+
 ### Fallback mode
 
 modern protocol が利用できない場合:
