@@ -215,6 +215,15 @@ impl TextBuffer {
         removed
     }
 
+    /// Returns a clone of the logical lines for coarse-grained undo groups.
+    ///
+    /// This is intentionally crate-private: editing APIs should still expose
+    /// grapheme positions, but full-buffer replace needs a stable snapshot so
+    /// undo can restore the exact pre-edit content in one step.
+    pub(crate) fn lines_snapshot(&self) -> Vec<String> {
+        self.lines.clone()
+    }
+
     /// Clamps a position to an existing line and that line's grapheme end.
     pub fn clamp_position(&self, pos: Position) -> Position {
         let line = pos.line.min(self.lines.len().saturating_sub(1));

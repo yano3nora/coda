@@ -268,6 +268,27 @@ const DEFAULTS: &[(&str, EditorAction, Option<&str>, Source)] = &[
         Source::Default,
     ),
     ("ctrl+s", EditorAction::FileSave, None, Source::Default),
+    ("cmd+f", EditorAction::SearchOpen, None, Source::Default),
+    (
+        "cmd+alt+f",
+        EditorAction::ReplaceOpen,
+        None,
+        Source::Default,
+    ),
+    ("cmd+g", EditorAction::SearchNext, None, Source::Default),
+    (
+        "cmd+shift+g",
+        EditorAction::SearchPrevious,
+        None,
+        Source::Default,
+    ),
+    ("f3", EditorAction::SearchNext, None, Source::Default),
+    (
+        "shift+f3",
+        EditorAction::SearchPrevious,
+        None,
+        Source::Default,
+    ),
     ("ctrl+q", EditorAction::AppQuit, None, Source::Default),
     (
         "ctrl+space",
@@ -318,5 +339,26 @@ mod tests {
             resolver.resolve(&["cmd+left".parse().unwrap()], &EditorContext::default()),
             ResolveResult::Matched(EditorAction::CursorLineStart)
         );
+    }
+
+    #[test]
+    fn search_default_bindings_parse_and_resolve() {
+        let resolver = Resolver::new(bindings());
+        let cases = [
+            ("cmd+f", EditorAction::SearchOpen),
+            ("cmd+alt+f", EditorAction::ReplaceOpen),
+            ("cmd+g", EditorAction::SearchNext),
+            ("cmd+shift+g", EditorAction::SearchPrevious),
+            ("f3", EditorAction::SearchNext),
+            ("shift+f3", EditorAction::SearchPrevious),
+        ];
+
+        for (key, action) in cases {
+            assert_eq!(
+                resolver.resolve(&[key.parse().unwrap()], &EditorContext::default()),
+                ResolveResult::Matched(action),
+                "{key}"
+            );
+        }
     }
 }

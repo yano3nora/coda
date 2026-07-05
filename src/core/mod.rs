@@ -4,5 +4,6 @@ pub mod buffer;
 pub mod editor;
 pub mod movement;
 pub mod position;
+pub mod search;
 pub mod selection;
 pub mod undo;

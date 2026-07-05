@@ -372,6 +372,73 @@ impl EditorCore {
         self.selection = Some(Selection::new(start, end));
     }
 
+    /// Selects a grapheme range and places the cursor at the range end.
+    pub fn select_range(&mut self, start: Position, end: Position) {
+        let start = self.buffer.clamp_position(start);
+        let end = self.buffer.clamp_position(end);
+        self.cursor = end;
+        self.update_preferred();
+        self.selection = Some(Selection::new(start, end));
+    }
+
+    /// Replaces one or more ranges as a single undoable edit group.
+    ///
+    /// Ranges are applied from the end of the buffer to the front so earlier
+    /// replacements cannot invalidate later original positions. The undo record
+    /// stores whole logical lines, not per-range inverse offsets, because mixed
+    /// replacement lengths would otherwise require translating positions in the
+    /// post-edit buffer.
+    pub fn replace_ranges(&mut self, replacements: &[(Position, Position, &str)]) {
+        if replacements.is_empty() {
+            return;
+        }
+
+        let cursor_before = self.cursor;
+        let selection_before = self.selection;
+        let old = self.buffer.lines_snapshot();
+        let mut ordered = replacements.to_vec();
+        ordered.sort_by_key(|(start, end, _)| (*start, *end));
+
+        let mut cursor_after = cursor_before;
+        for (start, end, replacement) in ordered.iter().rev() {
+            let start = self.buffer.clamp_position(*start);
+            let end = self.buffer.clamp_position(*end);
+            self.buffer.delete_range(start, end);
+            cursor_after = self.buffer.insert(start, replacement);
+        }
+
+        let new = self.buffer.lines_snapshot();
+        if old == new {
+            return;
+        }
+
+        self.cursor = self.buffer.clamp_position(cursor_after);
+        self.selection = None;
+        self.update_preferred();
+        let group = EditGroup::new(
+            vec![EditOp::ReplaceLines {
+                start: 0,
+                old: old.clone(),
+                new: new.clone(),
+            }],
+            vec![EditOp::ReplaceLines {
+                start: 0,
+                old: new,
+                new: old,
+            }],
+            cursor_before,
+            self.cursor,
+            MergeInfo {
+                kind: EditKind::Other,
+                start: cursor_before,
+                end: self.cursor,
+                text_has_newline: true,
+            },
+        )
+        .with_selection(selection_before, None);
+        self.undo.record(group);
+    }
+
     /// Forces a boundary before the next undoable edit.
     pub fn commit_group(&mut self) {
         self.undo.commit_group();
@@ -915,5 +982,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn replace_ranges_applies_back_to_front_and_undos_once() {
+        let mut editor = editor("foo foo\nfoo");
+        editor.cursor = Position::new(1, 3);
+        editor.selection = Some(Selection::new(Position::new(0, 0), Position::new(0, 3)));
+
+        editor.replace_ranges(&[
+            (Position::new(0, 0), Position::new(0, 3), "bar"),
+            (Position::new(0, 4), Position::new(0, 7), "bazzz"),
+            (Position::new(1, 0), Position::new(1, 3), "qux"),
+        ]);
+
+        assert_eq!(text(&editor), "bar bazzz\nqux");
+        assert!(editor.selection.is_none());
+        assert!(editor.undo(), "all replacements are one undo group");
+        assert_eq!(text(&editor), "foo foo\nfoo");
+        assert_eq!(editor.cursor, Position::new(1, 3));
+        assert_eq!(
+            editor.selection,
+            Some(Selection::new(Position::new(0, 0), Position::new(0, 3)))
+        );
     }
 }

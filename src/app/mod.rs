@@ -7,6 +7,7 @@ mod event_loop;
 mod file;
 mod import_cli;
 mod palette;
+mod search_overlay;
 
 use std::{env, ffi::OsString, path::PathBuf};
 

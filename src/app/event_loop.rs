@@ -23,6 +23,7 @@ use super::{
     editor_view::{EditorView, StatusLine},
     file,
     palette::{CommandPalette, filter_actions},
+    search_overlay::{SearchOverlay, draw_search_overlay},
 };
 
 const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(800);
@@ -60,6 +61,7 @@ pub struct EventLoop {
     resolver: Resolver,
     view: EditorView,
     palette: CommandPalette,
+    search: SearchOverlay,
     saved_snapshot: Vec<u8>,
     message: String,
     pending_keys: Vec<KeyEvent>,
@@ -89,6 +91,7 @@ impl EventLoop {
             resolver: Resolver::new(bindings),
             view: EditorView::default(),
             palette: CommandPalette::default(),
+            search: SearchOverlay::default(),
             saved_snapshot,
             message: warnings.join("; "),
             pending_keys: Vec::new(),
@@ -177,6 +180,7 @@ impl EventLoop {
             },
         );
         let items = filter_actions(&self.palette.query, self.resolver.bindings());
+        draw_search_overlay(screen, &self.search);
         super::palette::draw_palette(screen, &self.palette, &items);
     }
 
@@ -190,6 +194,10 @@ impl EventLoop {
             && let Some(decision) = self.handle_palette_key(&event)
         {
             return decision;
+        }
+
+        if self.search.visible && self.search.handle_key(&event, &mut self.editor) {
+            return QuitDecision::Continue;
         }
 
         self.pending_keys.push(event.clone());
@@ -343,7 +351,56 @@ impl EventLoop {
                 }
                 Err(error) => self.message = format!("save failed: {error}"),
             },
-            EditorAction::PaletteOpen => self.palette.open(),
+            EditorAction::PaletteOpen => {
+                self.search.close();
+                self.palette.open();
+            }
+            EditorAction::SearchOpen => {
+                self.palette.close();
+                self.search.open(false, &mut self.editor);
+            }
+            EditorAction::ReplaceOpen => {
+                self.palette.close();
+                self.search.open(true, &mut self.editor);
+            }
+            EditorAction::SearchNext => {
+                if self.search.query.is_empty() {
+                    self.search.open(false, &mut self.editor);
+                } else if self.search.visible {
+                    self.search.next(&mut self.editor);
+                } else {
+                    self.search.next_from_cursor(&mut self.editor);
+                }
+            }
+            EditorAction::SearchPrevious => {
+                if self.search.query.is_empty() {
+                    self.search.open(false, &mut self.editor);
+                } else if self.search.visible {
+                    self.search.previous(&mut self.editor);
+                } else {
+                    self.search.previous_from_cursor(&mut self.editor);
+                }
+            }
+            EditorAction::ReplaceNext => {
+                if self.search.query.is_empty() {
+                    self.search.open(true, &mut self.editor);
+                } else {
+                    if !self.search.visible {
+                        self.search.next_from_cursor(&mut self.editor);
+                    }
+                    self.search.replace_current(&mut self.editor);
+                }
+            }
+            EditorAction::ReplaceAll => {
+                if self.search.query.is_empty() {
+                    self.search.open(true, &mut self.editor);
+                } else {
+                    if !self.search.visible {
+                        self.search.next_from_cursor(&mut self.editor);
+                    }
+                    self.search.replace_all(&mut self.editor);
+                }
+            }
             EditorAction::AppQuit => match self.quit_guard.request_quit(self.is_modified()) {
                 QuitDecision::Quit => return QuitDecision::Quit,
                 QuitDecision::Continue => {
@@ -375,12 +432,14 @@ impl EventLoop {
 
     fn context(&self) -> EditorContext {
         EditorContext {
-            editor_focus: !self.palette.visible,
-            text_input_focus: !self.palette.visible,
+            editor_focus: !self.palette.visible && !self.search.visible,
+            text_input_focus: !self.palette.visible && !self.search.visible,
             has_selection: self
                 .editor
                 .selection
                 .is_some_and(|selection| !selection.is_empty()),
+            search_visible: self.search.context_flags().0,
+            replace_visible: self.search.context_flags().1,
             command_palette_visible: self.palette.visible,
             list_focus: self.palette.visible,
             ..EditorContext::default()
@@ -391,6 +450,7 @@ impl EventLoop {
         if self.palette.visible {
             self.palette.close();
         } else {
+            self.search.close();
             self.palette.open();
         }
     }
@@ -496,5 +556,21 @@ mod tests {
     fn quit_guard_allows_immediate_quit_when_clean() {
         let mut guard = QuitGuard::default();
         assert_eq!(guard.request_quit(false), QuitDecision::Quit);
+    }
+
+    #[test]
+    fn context_reflects_search_and_replace_overlay_focus() {
+        let path = std::env::temp_dir().join("coda-test-search-context.txt");
+        std::fs::write(&path, b"abc\n").unwrap();
+        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+
+        event_loop.dispatch(crate::keymap::EditorAction::ReplaceOpen);
+        let context = event_loop.context();
+        assert!(!context.editor_focus);
+        assert!(!context.text_input_focus);
+        assert!(context.search_visible);
+        assert!(context.replace_visible);
+
+        let _ = std::fs::remove_file(path);
     }
 }
