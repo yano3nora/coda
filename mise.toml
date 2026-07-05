@@ -1,37 +1,13 @@
 # https://mise.jdx.dev/
 # Project-local tool versions and tasks.
-# Uncomment only the parts this project actually needs.
 
-# [settings]
-# experimental = true
+[tools]
+rust = "stable"
 
-# [tools]
-# node = "24.14.1"
-# jq = "1.7.1"
-# ripgrep = "15.1.0"
-
-# [env]
-# _.file = ".env.local"
-
-# [hooks]
-# enter = [
-#   "echo '🍳 mise enabled'",
-#   "mise env --json | jq -r 'keys | join(\" \")'",
-# ]
-
-# [shell_aliases]
-# provision = "mise run provision"
-
-# [tasks.pre-commit]
-# description = "pre-commit: fix lint, format and run tests"
-# run = [
-#   "npm run fix",
-#   "npm test",
-# ]
-
-# [tasks.provision]
-# description = "provisioning"
-# run = [
-#   "mise generate git-pre-commit --task pre-commit --write",
-#   "npm ci",
-# ]
+[tasks.pre-commit]
+description = "pre-commit: format, lint and test Rust code"
+run = [
+  "cargo fmt --check",
+  "cargo clippy -- -D warnings",
+  "cargo test",
+]
