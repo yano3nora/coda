@@ -1,6 +1,6 @@
 //! Linear undo/redo stack based on inverse edit operations.
 
-use super::{buffer::TextBuffer, position::Position};
+use super::{buffer::TextBuffer, position::Position, selection::Selection};
 
 /// A primitive buffer mutation used for replaying undo and redo.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -9,6 +9,12 @@ pub enum EditOp {
     Insert { pos: Position, text: String },
     /// Delete the half-open range `start..end`.
     Delete { start: Position, end: Position },
+    /// Replace a contiguous logical line range.
+    ReplaceLines {
+        start: usize,
+        old: Vec<String>,
+        new: Vec<String>,
+    },
 }
 
 /// The merge class for adjacent edits.
@@ -35,6 +41,8 @@ pub struct EditGroup {
     pub inverse: Vec<EditOp>,
     pub cursor_before: Position,
     pub cursor_after: Position,
+    pub selection_before: Option<Selection>,
+    pub selection_after: Option<Selection>,
     pub merge: MergeInfo,
 }
 
@@ -52,8 +60,22 @@ impl EditGroup {
             inverse,
             cursor_before,
             cursor_after,
+            selection_before: None,
+            selection_after: None,
             merge,
         }
+    }
+
+    /// Attaches selection snapshots for edits that must undo/redo selection
+    /// shape as well as text and cursor position (for example line moves).
+    pub const fn with_selection(
+        mut self,
+        selection_before: Option<Selection>,
+        selection_after: Option<Selection>,
+    ) -> Self {
+        self.selection_before = selection_before;
+        self.selection_after = selection_after;
+        self
     }
 }
 
@@ -93,27 +115,29 @@ impl UndoStack {
     }
 
     /// Applies the latest inverse group and returns the restored cursor.
-    pub fn undo(&mut self, buffer: &mut TextBuffer) -> Option<Position> {
+    pub fn undo(&mut self, buffer: &mut TextBuffer) -> Option<(Position, Option<Selection>)> {
         let group = self.undo.pop()?;
         for op in group.inverse.iter().rev() {
             apply(buffer, op);
         }
         let cursor = group.cursor_before;
+        let selection = group.selection_before;
         self.redo.push(group);
         self.force_boundary = true;
-        Some(cursor)
+        Some((cursor, selection))
     }
 
     /// Re-applies the latest undone group and returns the redone cursor.
-    pub fn redo(&mut self, buffer: &mut TextBuffer) -> Option<Position> {
+    pub fn redo(&mut self, buffer: &mut TextBuffer) -> Option<(Position, Option<Selection>)> {
         let group = self.redo.pop()?;
         for op in &group.forward {
             apply(buffer, op);
         }
         let cursor = group.cursor_after;
+        let selection = group.selection_after;
         self.undo.push(group);
         self.force_boundary = true;
-        Some(cursor)
+        Some((cursor, selection))
     }
 }
 
@@ -136,6 +160,9 @@ fn apply(buffer: &mut TextBuffer, op: &EditOp) {
         }
         EditOp::Delete { start, end } => {
             buffer.delete_range(*start, *end);
+        }
+        EditOp::ReplaceLines { start, old: _, new } => {
+            buffer.replace_lines(*start, *start + new.len(), new.clone());
         }
     }
 }

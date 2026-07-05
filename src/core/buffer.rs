@@ -195,6 +195,26 @@ impl TextBuffer {
         self.line(line_index).map(grapheme_count).unwrap_or(0)
     }
 
+    /// Replaces a contiguous logical line range and returns the removed lines.
+    ///
+    /// This intentionally preserves file-level EOL metadata (`line_ending` and
+    /// `trailing_newline`). Line-moving edits need to reorder logical lines
+    /// without accidentally changing whether the file serializes with a final
+    /// newline.
+    pub(crate) fn replace_lines(
+        &mut self,
+        start: usize,
+        end_exclusive: usize,
+        replacement: Vec<String>,
+    ) -> Vec<String> {
+        let start = start.min(self.lines.len());
+        let end_exclusive = end_exclusive.min(self.lines.len()).max(start);
+        let removed = self.lines[start..end_exclusive].to_vec();
+        self.lines.splice(start..end_exclusive, replacement);
+        self.ensure_cursor_line();
+        removed
+    }
+
     /// Clamps a position to an existing line and that line's grapheme end.
     pub fn clamp_position(&self, pos: Position) -> Position {
         let line = pos.line.min(self.lines.len().saturating_sub(1));

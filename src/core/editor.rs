@@ -179,6 +179,17 @@ impl EditorCore {
         }
     }
 
+    /// Deletes from the current cursor position back to the start of the line.
+    pub fn delete_to_line_start(&mut self) {
+        if self.delete_selection_as_group() {
+            return;
+        }
+        let start = movement::line_start(&self.buffer, self.cursor);
+        if start != self.cursor {
+            self.delete_range_recorded(start, self.cursor, start, EditKind::Other);
+        }
+    }
+
     /// Deletes from the cursor to the next word boundary.
     pub fn delete_word_right(&mut self) {
         if self.delete_selection_as_group() {
@@ -219,6 +230,139 @@ impl EditorCore {
         self.delete_range_recorded(start, end, cursor_after, EditKind::Other);
     }
 
+    /// Moves the cursor line or selected line block up by one logical line.
+    pub fn move_lines_up(&mut self) {
+        let Some((start_line, end_line)) = self.selected_line_block() else {
+            return;
+        };
+        if start_line == 0 {
+            return;
+        }
+
+        let before_cursor = self.cursor;
+        let before_selection = self.selection;
+        let old = self.lines_inclusive(start_line - 1, end_line);
+        let mut new = self.lines_inclusive(start_line, end_line);
+        new.push(old[0].clone());
+        self.buffer
+            .replace_lines(start_line - 1, end_line + 1, new.clone());
+
+        self.cursor = shift_line(self.cursor, -1);
+        self.selection = self.selection.map(|selection| {
+            Selection::new(
+                shift_line(selection.anchor, -1),
+                shift_line(selection.head, -1),
+            )
+        });
+        self.update_preferred();
+        self.record_line_replace_group(LineReplaceUndo {
+            start: start_line - 1,
+            old,
+            new,
+            cursor_before: before_cursor,
+            selection_before: before_selection,
+            cursor_after: self.cursor,
+            selection_after: self.selection,
+        });
+    }
+
+    /// Moves the cursor line or selected line block down by one logical line.
+    pub fn move_lines_down(&mut self) {
+        let Some((start_line, end_line)) = self.selected_line_block() else {
+            return;
+        };
+        if end_line + 1 >= self.buffer.line_count() {
+            return;
+        }
+
+        let before_cursor = self.cursor;
+        let before_selection = self.selection;
+        let old = self.lines_inclusive(start_line, end_line + 1);
+        let mut new = Vec::with_capacity(old.len());
+        new.push(old.last().expect("range has following line").clone());
+        new.extend(old[..old.len() - 1].iter().cloned());
+        self.buffer
+            .replace_lines(start_line, end_line + 2, new.clone());
+
+        self.cursor = shift_line(self.cursor, 1);
+        self.selection = self.selection.map(|selection| {
+            Selection::new(
+                shift_line(selection.anchor, 1),
+                shift_line(selection.head, 1),
+            )
+        });
+        self.update_preferred();
+        self.record_line_replace_group(LineReplaceUndo {
+            start: start_line,
+            old,
+            new,
+            cursor_before: before_cursor,
+            selection_before: before_selection,
+            cursor_after: self.cursor,
+            selection_after: self.selection,
+        });
+    }
+
+    /// Inserts an empty line after the current line and moves the cursor there.
+    pub fn insert_line_after(&mut self) {
+        self.selection = None;
+        let before = self.cursor;
+        let line = self
+            .cursor
+            .line
+            .min(self.buffer.line_count().saturating_sub(1));
+        let insert_at = Position::new(line, self.buffer.grapheme_count(line));
+        let after_insert = self.buffer.insert(insert_at, "\n");
+        self.cursor = Position::new(line + 1, 0);
+        self.update_preferred();
+        self.record_group(
+            vec![EditOp::Insert {
+                pos: insert_at,
+                text: "\n".to_string(),
+            }],
+            vec![EditOp::Delete {
+                start: insert_at,
+                end: after_insert,
+            }],
+            before,
+            self.cursor,
+            EditKind::Other,
+            insert_at,
+            after_insert,
+            true,
+        );
+    }
+
+    /// Inserts an empty line before the current line and moves the cursor there.
+    pub fn insert_line_before(&mut self) {
+        self.selection = None;
+        let before = self.cursor;
+        let line = self
+            .cursor
+            .line
+            .min(self.buffer.line_count().saturating_sub(1));
+        let insert_at = Position::new(line, 0);
+        let after_insert = self.buffer.insert(insert_at, "\n");
+        self.cursor = Position::new(line, 0);
+        self.update_preferred();
+        self.record_group(
+            vec![EditOp::Insert {
+                pos: insert_at,
+                text: "\n".to_string(),
+            }],
+            vec![EditOp::Delete {
+                start: insert_at,
+                end: after_insert,
+            }],
+            before,
+            self.cursor,
+            EditKind::Other,
+            insert_at,
+            after_insert,
+            true,
+        );
+    }
+
     /// Selects the full buffer.
     pub fn select_all(&mut self) {
         let start = Position::new(0, 0);
@@ -235,20 +379,20 @@ impl EditorCore {
 
     /// Undoes one group and restores the group's starting cursor.
     pub fn undo(&mut self) -> bool {
-        let Some(cursor) = self.undo.undo(&mut self.buffer) else {
+        let Some((cursor, selection)) = self.undo.undo(&mut self.buffer) else {
             return false;
         };
-        self.selection = None;
+        self.selection = selection;
         self.set_cursor(cursor, true);
         true
     }
 
     /// Redoes one group and restores the group's ending cursor.
     pub fn redo(&mut self) -> bool {
-        let Some(cursor) = self.undo.redo(&mut self.buffer) else {
+        let Some((cursor, selection)) = self.undo.redo(&mut self.buffer) else {
             return false;
         };
-        self.selection = None;
+        self.selection = selection;
         self.set_cursor(cursor, true);
         true
     }
@@ -353,6 +497,74 @@ impl EditorCore {
     fn update_preferred(&mut self) {
         self.preferred_grapheme = self.cursor.grapheme;
     }
+
+    fn selected_line_block(&self) -> Option<(usize, usize)> {
+        let line_count = self.buffer.line_count();
+        if line_count == 0 {
+            return None;
+        }
+        if let Some(selection) = self.selection
+            && !selection.is_empty()
+        {
+            let (start, end) = selection.range();
+            let end_line = if end.grapheme == 0 && end.line > start.line {
+                end.line - 1
+            } else {
+                end.line
+            };
+            return Some((start.line.min(line_count - 1), end_line.min(line_count - 1)));
+        }
+        Some((
+            self.cursor.line.min(line_count - 1),
+            self.cursor.line.min(line_count - 1),
+        ))
+    }
+
+    fn lines_inclusive(&self, start: usize, end: usize) -> Vec<String> {
+        (start..=end)
+            .map(|line| {
+                self.buffer
+                    .line(line)
+                    .expect("line block range is valid")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn record_line_replace_group(&mut self, change: LineReplaceUndo) {
+        let group = EditGroup::new(
+            vec![EditOp::ReplaceLines {
+                start: change.start,
+                old: change.old.clone(),
+                new: change.new.clone(),
+            }],
+            vec![EditOp::ReplaceLines {
+                start: change.start,
+                old: change.new,
+                new: change.old,
+            }],
+            change.cursor_before,
+            change.cursor_after,
+            MergeInfo {
+                kind: EditKind::Other,
+                start: change.cursor_before,
+                end: change.cursor_after,
+                text_has_newline: true,
+            },
+        )
+        .with_selection(change.selection_before, change.selection_after);
+        self.undo.record(group);
+    }
+}
+
+struct LineReplaceUndo {
+    start: usize,
+    old: Vec<String>,
+    new: Vec<String>,
+    cursor_before: Position,
+    selection_before: Option<Selection>,
+    cursor_after: Position,
+    selection_after: Option<Selection>,
 }
 
 fn is_horizontal(motion: Motion) -> bool {
@@ -360,6 +572,10 @@ fn is_horizontal(motion: Motion) -> bool {
         motion,
         Motion::Up | Motion::Down | Motion::PageUp { .. } | Motion::PageDown { .. }
     )
+}
+
+fn shift_line(pos: Position, delta: isize) -> Position {
+    Position::new(pos.line.saturating_add_signed(delta), pos.grapheme)
 }
 
 #[cfg(test)]
@@ -560,6 +776,142 @@ mod tests {
                     editor.delete_word_left();
                     assert_eq!(text(&editor), "foo ", "case {name}");
                     assert_eq!(editor.cursor, Position::new(0, 4), "case {name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn line_actions_are_table_driven() {
+        enum Case {
+            MoveDownMiddle,
+            MoveUpMiddle,
+            MoveSelectionBlockDown,
+            MoveAtEdgesNoop,
+            MoveAcrossFinalLine,
+            InsertLineAfter,
+            InsertLineBefore,
+            DeleteToLineStart,
+            DeleteToLineStartAtStartNoop,
+        }
+
+        let cases = [
+            ("move down middle", Case::MoveDownMiddle),
+            ("move up middle", Case::MoveUpMiddle),
+            ("move selected block down", Case::MoveSelectionBlockDown),
+            ("move at edges noop", Case::MoveAtEdgesNoop),
+            ("move across final line", Case::MoveAcrossFinalLine),
+            ("insert line after", Case::InsertLineAfter),
+            ("insert line before", Case::InsertLineBefore),
+            ("delete to line start", Case::DeleteToLineStart),
+            (
+                "delete to line start at start noop",
+                Case::DeleteToLineStartAtStartNoop,
+            ),
+        ];
+
+        for (name, case) in cases {
+            match case {
+                Case::MoveDownMiddle => {
+                    let mut editor = editor("a\nb\nc");
+                    editor.cursor = Position::new(1, 1);
+                    editor.move_lines_down();
+                    assert_eq!(text(&editor), "a\nc\nb", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(2, 1), "case {name}");
+                    assert!(editor.undo(), "case {name}");
+                    assert_eq!(text(&editor), "a\nb\nc", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(1, 1), "case {name}");
+                    assert!(editor.redo(), "case {name}");
+                    assert_eq!(text(&editor), "a\nc\nb", "case {name}");
+                }
+                Case::MoveUpMiddle => {
+                    let mut editor = editor("a\nb\nc");
+                    editor.cursor = Position::new(1, 0);
+                    editor.move_lines_up();
+                    assert_eq!(text(&editor), "b\na\nc", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(0, 0), "case {name}");
+                    assert!(editor.undo(), "case {name}");
+                    assert_eq!(text(&editor), "a\nb\nc", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(1, 0), "case {name}");
+                }
+                Case::MoveSelectionBlockDown => {
+                    let mut editor = editor("a\nb\nc\nd");
+                    editor.selection =
+                        Some(Selection::new(Position::new(1, 0), Position::new(2, 1)));
+                    editor.cursor = Position::new(2, 1);
+                    editor.move_lines_down();
+                    assert_eq!(text(&editor), "a\nd\nb\nc", "case {name}");
+                    assert_eq!(
+                        editor.selection.unwrap(),
+                        Selection::new(Position::new(2, 0), Position::new(3, 1)),
+                        "case {name}"
+                    );
+                    assert!(editor.undo(), "case {name}");
+                    assert_eq!(text(&editor), "a\nb\nc\nd", "case {name}");
+                    assert_eq!(
+                        editor.selection.unwrap(),
+                        Selection::new(Position::new(1, 0), Position::new(2, 1)),
+                        "case {name}"
+                    );
+                }
+                Case::MoveAtEdgesNoop => {
+                    let mut editor = editor("a\nb");
+                    editor.cursor = Position::new(0, 0);
+                    editor.move_lines_up();
+                    assert_eq!(text(&editor), "a\nb", "case {name}");
+                    assert!(!editor.undo(), "case {name}");
+                    editor.cursor = Position::new(1, 0);
+                    editor.move_lines_down();
+                    assert_eq!(text(&editor), "a\nb", "case {name}");
+                    assert!(!editor.undo(), "case {name}");
+                }
+                Case::MoveAcrossFinalLine => {
+                    let mut editor = editor("a\nb\nc");
+                    editor.cursor = Position::new(2, 0);
+                    editor.move_lines_up();
+                    assert_eq!(text(&editor), "a\nc\nb", "case {name}");
+                    assert_eq!(editor.buffer.line_count(), 3, "case {name}");
+                    editor.cursor = Position::new(1, 0);
+                    editor.move_lines_down();
+                    assert_eq!(text(&editor), "a\nb\nc", "case {name}");
+                    assert_eq!(editor.buffer.line_count(), 3, "case {name}");
+                }
+                Case::InsertLineAfter => {
+                    let mut editor = editor("a\nb");
+                    editor.cursor = Position::new(0, 1);
+                    editor.insert_line_after();
+                    assert_eq!(text(&editor), "a\n\nb", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(1, 0), "case {name}");
+                    assert!(editor.undo(), "case {name}");
+                    assert_eq!(text(&editor), "a\nb", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(0, 1), "case {name}");
+                }
+                Case::InsertLineBefore => {
+                    let mut editor = editor("a\nb");
+                    editor.cursor = Position::new(1, 1);
+                    editor.insert_line_before();
+                    assert_eq!(text(&editor), "a\n\nb", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(1, 0), "case {name}");
+                    assert!(editor.undo(), "case {name}");
+                    assert_eq!(text(&editor), "a\nb", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(1, 1), "case {name}");
+                }
+                Case::DeleteToLineStart => {
+                    let mut editor = editor("abc");
+                    editor.cursor = Position::new(0, 2);
+                    editor.delete_to_line_start();
+                    assert_eq!(text(&editor), "c", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(0, 0), "case {name}");
+                    assert!(editor.undo(), "case {name}");
+                    assert_eq!(text(&editor), "abc", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(0, 2), "case {name}");
+                }
+                Case::DeleteToLineStartAtStartNoop => {
+                    let mut editor = editor("abc");
+                    editor.cursor = Position::new(0, 0);
+                    editor.delete_to_line_start();
+                    assert_eq!(text(&editor), "abc", "case {name}");
+                    assert!(!editor.undo(), "case {name}");
                 }
             }
         }

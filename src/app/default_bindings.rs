@@ -1,4 +1,4 @@
-//! Minimal built-in bindings for MVP editor operation.
+//! Built-in bindings for rescue access and OS-standard text editing.
 
 use crate::keymap::{Binding, EditorAction, Source, parse_key_sequence};
 
@@ -64,6 +64,42 @@ const DEFAULTS: &[(&str, EditorAction, Option<&str>, Source)] = &[
         Source::Default,
     ),
     (
+        "cmd+left",
+        EditorAction::CursorLineStart,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+right",
+        EditorAction::CursorLineEnd,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+up",
+        EditorAction::CursorBufferStart,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+down",
+        EditorAction::CursorBufferEnd,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "alt+left",
+        EditorAction::CursorWordLeft,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "alt+right",
+        EditorAction::CursorWordRight,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
         "shift+up",
         EditorAction::SelectionUp,
         Some("editorFocus"),
@@ -124,6 +160,42 @@ const DEFAULTS: &[(&str, EditorAction, Option<&str>, Source)] = &[
         Source::Default,
     ),
     (
+        "cmd+shift+left",
+        EditorAction::SelectionLineStart,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+shift+right",
+        EditorAction::SelectionLineEnd,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+shift+up",
+        EditorAction::SelectionBufferStart,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+shift+down",
+        EditorAction::SelectionBufferEnd,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "alt+shift+left",
+        EditorAction::SelectionWordLeft,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
+        "alt+shift+right",
+        EditorAction::SelectionWordRight,
+        Some("editorFocus"),
+        Source::Default,
+    ),
+    (
         "backspace",
         EditorAction::EditBackspace,
         Some("textInputFocus"),
@@ -138,6 +210,42 @@ const DEFAULTS: &[(&str, EditorAction, Option<&str>, Source)] = &[
     (
         "ctrl+backspace",
         EditorAction::EditDeleteWordLeft,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
+        "alt+backspace",
+        EditorAction::EditDeleteWordLeft,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+backspace",
+        EditorAction::EditDeleteToLineStart,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
+        "alt+up",
+        EditorAction::EditMoveLinesUp,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
+        "alt+down",
+        EditorAction::EditMoveLinesDown,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+enter",
+        EditorAction::EditInsertLineAfter,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+shift+enter",
+        EditorAction::EditInsertLineBefore,
         Some("textInputFocus"),
         Source::Default,
     ),
@@ -192,7 +300,7 @@ pub fn bindings() -> Vec<Binding> {
 #[cfg(test)]
 mod tests {
     use super::bindings;
-    use crate::keymap::{EditorContext, ResolveResult, Resolver};
+    use crate::keymap::{EditorAction, EditorContext, ResolveResult, Resolver};
 
     #[test]
     fn all_default_bindings_load_into_resolver() {
@@ -201,5 +309,14 @@ mod tests {
             resolver.resolve(&["ctrl+s".parse().unwrap()], &EditorContext::default()),
             ResolveResult::Matched(_)
         ));
+    }
+
+    #[test]
+    fn os_standard_default_binding_resolves_through_resolver() {
+        let resolver = Resolver::new(bindings());
+        assert_eq!(
+            resolver.resolve(&["cmd+left".parse().unwrap()], &EditorContext::default()),
+            ResolveResult::Matched(EditorAction::CursorLineStart)
+        );
     }
 }

@@ -95,6 +95,12 @@ rescue は「例外ショートカットの集合」ではなく、**command pal
 - これにより `Ctrl+c` / `Ctrl+s` / `Ctrl+q` / `Ctrl+g` は rescue から解放され、user / imported binding が自由に使える(`Ctrl+c` = copy 等)
 - `Ctrl+c` の SIGINT は raw mode で無効化し、通常の key として扱う
 
+### Default binding scope
+
+default binding は「rescue + OS 標準 text 操作の慣習キー」を提供する。具体的には、矢印/Home/End/Page、macOS 系の `Cmd+矢印`(行頭/行末・buffer 先頭/末尾)、`Option/Alt+矢印`(単語移動)、`Cmd/Alt+Backspace`、`Alt+Up/Down`、`Cmd+Enter` 系のように、import 以前の操作前提になるキーを `Source::Default` として持つ。
+
+editor 固有機能の default は引き続き最小にし、GUI editor の広い command 互換は default へ増やさない。`user` / `imported` は source 優先度により default を上書きできる。
+
 ### Key sequences
 
 - `Ctrl+x Ctrl+s` のような複数 chord の sequence をサポートする
@@ -151,3 +157,4 @@ Source: imported:vscode
 - 2026-07-05: 初版。draft の優先度 5 層(rescue > overlay > user > imported > default)を「context filter + source 優先度 + 限定性」に整理(ADR-0002)。
 - 2026-07-05: rescue を「複数の例外ショートカット」から「command palette 単一入口(`F1` 保証)」に変更。`Ctrl+c` / `Ctrl+s` / `Ctrl+q` / `Ctrl+g` を user keymap に開放。
 - 2026-07-05: palette の便宜キーを `Ctrl+Shift+p` から `Ctrl+Space` に変更。Ghostty 実測で `Cmd+Shift+P` が Ghostty 自身の palette に消費されることを確認したため(GUI shell と有名キーを取り合わない方針。ADR-0007)。
+- 2026-07-06: default binding 方針を「最小」から「rescue + OS 標準 text 操作の慣習キー」へ拡張。editor 固有機能は引き続き import / user binding 優先で最小維持。

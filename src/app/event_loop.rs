@@ -290,6 +290,8 @@ impl EventLoop {
             EditorAction::CursorWordRight => self.editor.move_cursor(Motion::WordRight, false),
             EditorAction::CursorLineStart => self.editor.move_cursor(Motion::LineStart, false),
             EditorAction::CursorLineEnd => self.editor.move_cursor(Motion::LineEnd, false),
+            EditorAction::CursorBufferStart => self.editor.move_cursor(Motion::BufferStart, false),
+            EditorAction::CursorBufferEnd => self.editor.move_cursor(Motion::BufferEnd, false),
             EditorAction::CursorPageUp => {
                 self.editor.move_cursor(Motion::PageUp { rows: 10 }, false)
             }
@@ -304,6 +306,10 @@ impl EventLoop {
             EditorAction::SelectionWordRight => self.editor.move_cursor(Motion::WordRight, true),
             EditorAction::SelectionLineStart => self.editor.move_cursor(Motion::LineStart, true),
             EditorAction::SelectionLineEnd => self.editor.move_cursor(Motion::LineEnd, true),
+            EditorAction::SelectionBufferStart => {
+                self.editor.move_cursor(Motion::BufferStart, true)
+            }
+            EditorAction::SelectionBufferEnd => self.editor.move_cursor(Motion::BufferEnd, true),
             EditorAction::SelectionPageUp => {
                 self.editor.move_cursor(Motion::PageUp { rows: 10 }, true)
             }
@@ -314,6 +320,11 @@ impl EventLoop {
             EditorAction::EditBackspace => self.editor.backspace(),
             EditorAction::EditDelete => self.editor.delete_forward(),
             EditorAction::EditDeleteWordLeft => self.editor.delete_word_left(),
+            EditorAction::EditDeleteToLineStart => self.editor.delete_to_line_start(),
+            EditorAction::EditInsertLineAfter => self.editor.insert_line_after(),
+            EditorAction::EditInsertLineBefore => self.editor.insert_line_before(),
+            EditorAction::EditMoveLinesUp => self.editor.move_lines_up(),
+            EditorAction::EditMoveLinesDown => self.editor.move_lines_down(),
             EditorAction::EditUndo => {
                 if !self.editor.undo() {
                     self.message = "nothing to undo".to_string();
