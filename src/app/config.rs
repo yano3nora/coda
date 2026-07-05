@@ -21,10 +21,12 @@ pub fn load() -> AppConfig {
     match fs::read_to_string(&path) {
         Ok(text) => match load_user_bindings(&text) {
             Ok(loaded) => {
+                // Status-bar real estate is scarce: lead with the issue, not a
+                // long absolute path. The file location is the standard one.
                 let warnings = loaded
                     .issues
                     .iter()
-                    .map(|issue| format!("{}: {issue}", path.display()))
+                    .map(|issue| format!("bindings.json: {issue}"))
                     .collect();
                 AppConfig {
                     user_bindings: loaded.bindings,

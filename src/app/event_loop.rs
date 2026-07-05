@@ -181,8 +181,10 @@ impl EventLoop {
             return QuitDecision::Continue;
         }
 
-        if self.palette.visible && self.handle_palette_key(&event) {
-            return QuitDecision::Continue;
+        if self.palette.visible
+            && let Some(decision) = self.handle_palette_key(&event)
+        {
+            return decision;
         }
 
         self.pending_keys.push(event.clone());
@@ -209,33 +211,36 @@ impl EventLoop {
         }
     }
 
-    fn handle_palette_key(&mut self, event: &KeyEvent) -> bool {
+    /// Returns `Some(decision)` when the palette consumed the key. Actions
+    /// executed from the palette (e.g. app.quit) must propagate their quit
+    /// decision to the run loop, so this cannot collapse to a bool.
+    fn handle_palette_key(&mut self, event: &KeyEvent) -> Option<QuitDecision> {
         match &event.key {
             Key::Esc if event.modifiers == Modifiers::none() => {
                 self.palette.close();
-                true
+                Some(QuitDecision::Continue)
             }
             Key::Up if event.modifiers == Modifiers::none() => {
                 let count = filter_actions(&self.palette.query, self.resolver.bindings()).len();
                 self.palette.move_selection(-1, count);
-                true
+                Some(QuitDecision::Continue)
             }
             Key::Down if event.modifiers == Modifiers::none() => {
                 let count = filter_actions(&self.palette.query, self.resolver.bindings()).len();
                 self.palette.move_selection(1, count);
-                true
+                Some(QuitDecision::Continue)
             }
             Key::Enter if event.modifiers == Modifiers::none() => {
                 let items = filter_actions(&self.palette.query, self.resolver.bindings());
                 if let Some(action) = self.palette.selected_action(&items) {
                     self.palette.close();
-                    let _ = self.dispatch(action);
+                    return Some(self.dispatch(action));
                 }
-                true
+                Some(QuitDecision::Continue)
             }
             Key::Backspace if event.modifiers == Modifiers::none() => {
                 self.palette.backspace();
-                true
+                Some(QuitDecision::Continue)
             }
             Key::Char(character)
                 if !event.modifiers.contains_ctrl()
@@ -243,9 +248,9 @@ impl EventLoop {
                     && !event.modifiers.contains_super() =>
             {
                 self.palette.push_char(*character);
-                true
+                Some(QuitDecision::Continue)
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -439,7 +444,30 @@ fn format_candidates(candidates: &[(Vec<KeyEvent>, EditorAction)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{QuitDecision, QuitGuard};
+    use super::{EventLoop, QuitDecision, QuitGuard};
+    use crate::input::{Key, KeyEvent};
+
+    #[test]
+    fn palette_app_quit_propagates_quit_decision_when_clean() {
+        let path = std::env::temp_dir().join("coda-test-palette-quit.txt");
+        std::fs::write(&path, b"abc\n").unwrap();
+        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+
+        assert_eq!(
+            event_loop.handle_key(KeyEvent::plain(Key::F(1))),
+            QuitDecision::Continue,
+            "F1 opens the palette"
+        );
+        for character in "quit".chars() {
+            event_loop.handle_key(KeyEvent::plain(Key::Char(character)));
+        }
+        assert_eq!(
+            event_loop.handle_key(KeyEvent::plain(Key::Enter)),
+            QuitDecision::Quit,
+            "palette app.quit on a clean buffer must quit"
+        );
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn quit_guard_requires_second_quit_when_modified() {

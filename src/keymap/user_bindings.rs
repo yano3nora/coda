@@ -236,7 +236,16 @@ impl fmt::Display for BindingIssueReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidKey(detail) => write!(formatter, "invalid key ({detail})"),
-            Self::UnknownCommand(command) => write!(formatter, "unknown command `{command}`"),
+            Self::UnknownCommand(command) => {
+                write!(formatter, "unknown command `{command}`")?;
+                // Users habitually paste VS Code entries into bindings.json.
+                // Point them at the internal name; keep it short because this
+                // often renders in the one-line status bar.
+                if let Some(action) = super::action_for_vscode_command(command) {
+                    write!(formatter, " — use `{action}`")?;
+                }
+                Ok(())
+            }
             Self::InvalidWhen(detail) => write!(formatter, "invalid when clause ({detail})"),
             Self::MissingField(name) => write!(formatter, "missing required field `{name}`"),
         }
@@ -250,6 +259,17 @@ mod tests {
         input::{Key, KeyEvent, Modifiers},
         keymap::{EditorAction, Source},
     };
+
+    #[test]
+    fn unknown_vscode_command_display_suggests_internal_name() {
+        let loaded =
+            load_user_bindings(r#"[{ "key": "cmd+j", "command": "cursorDown" }]"#).unwrap();
+        let message = loaded.issues[0].to_string();
+        assert!(
+            message.contains("use `cursor.down`"),
+            "suggestion missing from: {message}"
+        );
+    }
 
     #[test]
     fn loads_valid_entries_in_definition_order_as_user_source() {

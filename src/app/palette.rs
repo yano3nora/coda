@@ -70,41 +70,84 @@ pub fn filter_actions(query: &str, bindings: &[Binding]) -> Vec<PaletteItem> {
         .collect()
 }
 
+/// Returns the first visible item index so `selected` stays on screen.
+///
+/// Pure so the scroll window rule is unit-testable apart from drawing.
+pub fn scroll_offset(selected: usize, item_count: usize, max_rows: usize) -> usize {
+    if max_rows == 0 || item_count <= max_rows {
+        return 0;
+    }
+    let max_offset = item_count - max_rows;
+    selected.saturating_sub(max_rows - 1).min(max_offset)
+}
+
 pub fn draw_palette(screen: &mut Screen, palette: &CommandPalette, items: &[PaletteItem]) {
-    if !palette.visible || screen.height() < 3 || screen.width() < 10 {
+    if !palette.visible || screen.height() < 6 || screen.width() < 12 {
         return;
     }
-    let width = screen.width().saturating_sub(4);
-    let max_items = usize::from(screen.height().saturating_sub(4)).min(8);
-    let x = 2;
-    let y = 1;
+    // Boxed modal: ╭ title ╮ / query / items / ╰ count ╯. The interior is
+    // blanked so editor text underneath cannot bleed through between rows.
+    let box_x = 2;
+    let box_width = screen.width().saturating_sub(4);
+    let inner_width = usize::from(box_width.saturating_sub(4));
+    let max_items = usize::from(screen.height().saturating_sub(6)).clamp(1, 10);
+    let shown = items.len().min(max_items);
+    let box_top = 1;
+    let box_height = (shown as u16) + 3; // top border + query + items + bottom border
+
     let reverse = Style {
         reverse: true,
         dim: false,
     };
+    let dim = Style {
+        reverse: false,
+        dim: true,
+    };
     let normal = Style::default();
 
-    screen.put_str(x, y, &format!("> {}", palette.query), reverse);
-    for row in 0..max_items {
-        let Some(item) = items.get(row) else {
-            break;
+    for row in 0..box_height {
+        let y = box_top + row;
+        let line = if row == 0 {
+            frame_line("╭", "─", "╮", " Command Palette ", usize::from(box_width))
+        } else if row == box_height - 1 {
+            let count = format!(" {}/{} ", shown, items.len());
+            frame_line("╰", "─", "╯", &count, usize::from(box_width))
+        } else {
+            format!("│{}│", " ".repeat(usize::from(box_width) - 2))
         };
+        screen.put_str(box_x, y, &line, dim);
+    }
+
+    screen.put_str(
+        box_x + 2,
+        box_top + 1,
+        &clip_to_width(&format!("> {}", palette.query), inner_width),
+        normal,
+    );
+
+    let offset = scroll_offset(palette.selected, items.len(), max_items);
+    for (row, item) in items.iter().skip(offset).take(max_items).enumerate() {
         let label = match &item.binding {
-            Some(binding) => format!("{}    {}", item.action.as_str(), binding),
+            Some(binding) => format!("{:<32}{}", item.action.as_str(), binding),
             None => item.action.as_str().to_string(),
         };
-        let clipped = clip_to_width(&label, usize::from(width));
-        screen.put_str(
-            x,
-            y + 1 + row as u16,
-            &clipped,
-            if row == palette.selected {
-                reverse
-            } else {
-                normal
-            },
-        );
+        let clipped = clip_to_width(&label, inner_width);
+        let is_selected = offset + row == palette.selected;
+        let style = if is_selected { reverse } else { normal };
+        // Pad the selected row to full width so the highlight forms a bar.
+        let padded = format!("{:<width$}", clipped, width = inner_width);
+        screen.put_str(box_x + 2, box_top + 2 + row as u16, &padded, style);
     }
+}
+
+fn frame_line(left: &str, fill: &str, right: &str, title: &str, width: usize) -> String {
+    let inner = width.saturating_sub(2);
+    let title = clip_to_width(title, inner);
+    let title_len = title.chars().count();
+    format!(
+        "{left}{title}{}{right}",
+        fill.repeat(inner.saturating_sub(title_len))
+    )
 }
 
 fn best_binding_for(action: EditorAction, bindings: &[Binding]) -> Option<&Binding> {
@@ -129,7 +172,21 @@ fn clip_to_width(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::filter_actions;
+    use super::{filter_actions, scroll_offset};
+
+    #[test]
+    fn scroll_offset_keeps_selection_visible() {
+        let cases = [
+            ("fits entirely", 5, 6, 10, 0),
+            ("top of long list", 0, 30, 8, 0),
+            ("selection at window edge", 7, 30, 8, 0),
+            ("selection scrolls window", 12, 30, 8, 5),
+            ("selection at end pins to max offset", 29, 30, 8, 22),
+        ];
+        for (name, selected, count, rows, expected) in cases {
+            assert_eq!(scroll_offset(selected, count, rows), expected, "{name}");
+        }
+    }
 
     #[test]
     fn palette_filter_matches_case_insensitive_substrings() {

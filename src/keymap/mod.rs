@@ -7,6 +7,7 @@ mod key_parse;
 mod predicate;
 mod resolver;
 mod user_bindings;
+mod vscode_commands;
 
 pub use action::{EditorAction, ParseActionError};
 pub use binding::{Binding, Source};
@@ -17,3 +18,4 @@ pub use resolver::{ResolveResult, Resolver};
 pub use user_bindings::{
     BindingIssue, BindingIssueReason, UserBindingsError, UserBindingsLoad, load_user_bindings,
 };
+pub use vscode_commands::action_for_vscode_command;

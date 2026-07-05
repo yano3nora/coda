@@ -56,7 +56,10 @@ impl Default for TextBuffer {
         Self {
             lines: vec![String::new()],
             line_ending: LineEnding::Lf,
-            trailing_newline: false,
+            // New (not-loaded) buffers default to POSIX-friendly output: files
+            // written without a final newline make shells show a "%" marker and
+            // pollute diffs. Loaded files keep whatever from_bytes detected.
+            trailing_newline: true,
         }
     }
 }
