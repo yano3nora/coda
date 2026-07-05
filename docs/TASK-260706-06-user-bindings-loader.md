@@ -17,7 +17,7 @@
 
 ## todo
 
-- [ ] `src/keymap/user_bindings.rs` を実装する
+- [x] `src/keymap/user_bindings.rs` を実装する
     - 入力形式(SPEC-0005。VS Code keybindings.json と同形):
       ```jsonc
       [
@@ -35,24 +35,26 @@
         - `key` / `command` フィールド欠落 → `MissingField(名前)`
         - 未知フィールドは無視する(将来互換)
     - 成功 entry は `Binding { source: Source::User }` として**定義順を保持**して返す(resolver の後勝ち規則に効くため)
-- [ ] `src/keymap/mod.rs` で公開する
-- [ ] table-driven unit test(AGENTS.md Testing 方針)
+- [x] `src/keymap/mod.rs` で公開する
+- [x] table-driven unit test(AGENTS.md Testing 方針)
 
 ## testcases
 
-- [ ] 正常系: 2 entry(when あり / なし)が定義順で `Source::User` の binding になる
-- [ ] JSONC: `//` 行コメント・`/* */` ブロックコメント付きが parse できる
-- [ ] 文字列内の `//`(例: `"when": "editorFocus // not-a-comment"` は when parse エラーになるが、JSON としては壊れない)がコメント扱いされない
-- [ ] `"key": "ctrl+banana"` → 該当 entry のみ `InvalidKey`、他 entry は生きる
-- [ ] `"command": "editor.action.rename"` → `UnknownCommand`
-- [ ] `"when": "resourceLangId == markdown"` → `InvalidWhen`
-- [ ] `key` 欠落 → `MissingField("key")`
-- [ ] 空配列 `[]` → bindings も issues も空で成功
-- [ ] root がオブジェクト / 壊れた JSON → `UserBindingsError`
-- [ ] issue の `index` が元 JSON の entry 位置を指す
-- [ ] `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` がすべて通る
+- [x] 正常系: 2 entry(when あり / なし)が定義順で `Source::User` の binding になる
+- [x] JSONC: `//` 行コメント・`/* */` ブロックコメント付きが parse できる
+- [x] 文字列内の `//`(例: `"when": "editorFocus // not-a-comment"` は when parse エラーになるが、JSON としては壊れない)がコメント扱いされない
+- [x] `"key": "ctrl+banana"` → 該当 entry のみ `InvalidKey`、他 entry は生きる
+- [x] `"command": "editor.action.rename"` → `UnknownCommand`
+- [x] `"when": "resourceLangId == markdown"` → `InvalidWhen`
+- [x] `key` 欠落 → `MissingField("key")`
+- [x] 空配列 `[]` → bindings も issues も空で成功
+- [x] root がオブジェクト / 壊れた JSON → `UserBindingsError`
+- [x] issue の `index` が元 JSON の entry 位置を指す
+- [x] `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` がすべて通る
 
 ## notes
+
+- レビュー指摘なし (JSONC 除去の escape 処理・entry 単位 issue の網羅を確認済み)
 
 - 依存は導入済みの serde / serde_json を使う。**それ以外の新規依存は追加禁止**(JSONC 除去は自前の小関数でよい。json5 等の crate を足さない)
 - `BindingIssue` は将来 import report(SPEC-0004)と同じ表示経路に乗る。人間可読な `Display` を実装しておく
