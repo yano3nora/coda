@@ -130,14 +130,17 @@ fn disarm_signal_restore() {
 
 extern "C" fn restore_then_exit(signal_number: libc::c_int) {
     // Only async-signal-safe calls are allowed here (write / tcsetattr / _exit are).
-    if ALT_SCREEN_ACTIVE.load(Ordering::SeqCst) {
-        unsafe {
-            libc::write(1, ALT_SCREEN_LEAVE.as_ptr().cast(), ALT_SCREEN_LEAVE.len());
-        }
-    }
+    // Pop the keyboard protocol BEFORE leaving the alternate screen: kitty
+    // tracks the keyboard mode stack per screen, and the editor pushes its
+    // mode on the alternate screen (see EventLoop::run).
     if KEYBOARD_PROTOCOL_PUSHED.load(Ordering::SeqCst) {
         unsafe {
             libc::write(1, KITTY_POP.as_ptr().cast(), KITTY_POP.len());
+        }
+    }
+    if ALT_SCREEN_ACTIVE.load(Ordering::SeqCst) {
+        unsafe {
+            libc::write(1, ALT_SCREEN_LEAVE.as_ptr().cast(), ALT_SCREEN_LEAVE.len());
         }
     }
     if SIGNAL_RESTORE_ACTIVE.load(Ordering::SeqCst) {

@@ -102,8 +102,7 @@ fn parse_keymap_import_vscode(args: &[OsString]) -> Option<Command> {
     }
     if args.len() < 3 || args[1] != "import" || args[2] != "vscode" {
         return Some(Command::InvalidUsage(
-            "usage: coda keymap import vscode <path> [--dry-run] [--replace] [--print-report]"
-                .to_string(),
+            "usage: coda keymap import vscode <path> [--dry-run] [--print-report]".to_string(),
         ));
     }
     if args.len() < 4 {
@@ -116,13 +115,13 @@ fn parse_keymap_import_vscode(args: &[OsString]) -> Option<Command> {
     let mut options = ImportOptions {
         path,
         dry_run: false,
-        replace: false,
         print_report: false,
     };
     for flag in &args[4..] {
         match flag.to_string_lossy().as_ref() {
             "--dry-run" => options.dry_run = true,
-            "--replace" => options.replace = true,
+            // Accepted for backwards compatibility; overwriting is now the default.
+            "--replace" => {}
             "--print-report" => options.print_report = true,
             unknown => {
                 return Some(Command::InvalidUsage(format!(
@@ -175,7 +174,6 @@ mod tests {
             Command::KeymapImportVscode(super::ImportOptions {
                 path: PathBuf::from("keys.json"),
                 dry_run: true,
-                replace: true,
                 print_report: true,
             })
         );

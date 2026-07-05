@@ -14,7 +14,6 @@ use crate::keymap::{VsCodeImportError, import_vscode_keybindings, render_generat
 pub struct ImportOptions {
     pub path: PathBuf,
     pub dry_run: bool,
-    pub replace: bool,
     pub print_report: bool,
 }
 
@@ -50,12 +49,8 @@ pub(crate) fn run_vscode_import_in_base(
     let report_text = imported.report.render_text();
 
     if !options.dry_run {
-        if generated_path.exists() && !options.replace {
-            return Err(format!(
-                "{} already exists; rerun with --replace to overwrite generated bindings",
-                generated_path.display()
-            ));
-        }
+        // generated/ is importer-owned output; re-import is the normal
+        // workflow, so it is always overwritten (user bindings are separate).
         write_parented(
             &generated_path,
             render_generated_bindings(&imported.bindings).as_bytes(),
@@ -123,7 +118,6 @@ mod tests {
             &ImportOptions {
                 path: input_path,
                 dry_run: true,
-                replace: false,
                 print_report: false,
             },
             &temp.join("config"),
@@ -137,27 +131,31 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_replace_existing_generated_without_flag() {
+    fn reimport_overwrites_existing_generated_without_any_flag() {
         let temp = std::env::temp_dir().join(format!("coda-import-replace-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
         let base = temp.join("config");
         fs::create_dir_all(base.join("generated")).unwrap();
-        fs::write(base.join("generated/vscode-bindings.json"), "[]").unwrap();
+        fs::write(base.join("generated/vscode-bindings.json"), "stale").unwrap();
         let input_path = temp.join("keybindings.json");
-        fs::write(&input_path, "[]").unwrap();
+        fs::write(
+            &input_path,
+            r#"[{ "key": "ctrl+j", "command": "cursorDown" }]"#,
+        )
+        .unwrap();
 
-        let error = run_vscode_import_in_base(
+        run_vscode_import_in_base(
             &ImportOptions {
                 path: input_path,
                 dry_run: false,
-                replace: false,
                 print_report: false,
             },
             &base,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.contains("--replace"));
+        let generated = fs::read_to_string(base.join("generated/vscode-bindings.json")).unwrap();
+        assert!(generated.contains("cursor.down"), "{generated}");
         fs::remove_dir_all(&temp).unwrap();
     }
 }

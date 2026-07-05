@@ -99,9 +99,14 @@ impl EventLoop {
 
     pub fn run(mut self) -> io::Result<()> {
         let _raw = RawModeGuard::enable_stdin()?;
-        let mut stdout = io::stdout().lock();
-        let _keyboard = KeyboardProtocolGuard::push(&mut stdout)?;
+        let stdout = io::stdout().lock();
+        // Alternate screen FIRST, keyboard protocol SECOND: kitty tracks the
+        // keyboard mode stack separately for the main and alternate screens,
+        // so pushing before entering the alt screen leaves the editor screen
+        // in legacy mode (Ctrl+J arrives as 0x0a = Enter). Drop order (reverse
+        // declaration) pops the protocol while still on the alt screen.
         let mut alt = AltScreenGuard::enter(stdout)?;
+        let _keyboard = KeyboardProtocolGuard::push(alt.writer_mut())?;
         let mut stdin = io::stdin().lock();
         let mut byte_buffer = Vec::new();
         let (width, height) = terminal_size().unwrap_or((80, 24));
