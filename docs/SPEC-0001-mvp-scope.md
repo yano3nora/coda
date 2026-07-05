@@ -52,6 +52,7 @@ ADR-0001 の Non-goals に加え、MVP では以下を実装しない。
 ### Editing
 
 - character / word / line start / line end / page 単位の cursor movement
+- 行番号 gutter の常時表示(buffer 行数で桁揃え。2026-07-06 dogfood フィードバックにより deferred から昇格)
 - selection movement、basic multi-line selection、select all
 - copy / cut / paste
     - paste は terminal の bracketed paste を第一とする(`Cmd+V` 等は terminal に委譲。ADR-0008)
@@ -160,4 +161,4 @@ CLI は SPEC-0005、設定ファイルは ADR-0005 / SPEC-0005 を参照。
 
 - large file protection の閾値(サイズ / 行数)と挙動(警告 / read-only / 拒否)
 - clipboard 統合の優先順位(OSC 52 / OS clipboard コマンド / 内部 clipboard の fallback 順)
-- Deferred(MVP 完了後に判断): split view 正式サポート、tree-sitter(highlighting engine の差し替え候補として)、ユーザー theme 追加、persistent session、recent files、fuzzy file open、line numbers / minimap 相当、read-only mode、diff mode、他 editor profile import(Zed / Sublime / JetBrains / Helix)、remote clipboard、SSH 向け bootstrap、configuration UI、keybinding conflict UI
+- Deferred(MVP 完了後に判断): split view 正式サポート、tree-sitter(highlighting engine の差し替え候補として)、ユーザー theme 追加、persistent session、recent files、fuzzy file open、minimap 相当、read-only mode、diff mode、他 editor profile import(Zed / Sublime / JetBrains / Helix)、remote clipboard、SSH 向け bootstrap、configuration UI、keybinding conflict UI

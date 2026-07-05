@@ -23,6 +23,15 @@ pub struct StatusLine<'a> {
 }
 
 impl EditorView {
+    /// Width of the line-number gutter, including one trailing space.
+    ///
+    /// Sized to the whole buffer (not the viewport) so the text area does not
+    /// shift while scrolling through the file.
+    fn gutter_width(editor: &EditorCore) -> usize {
+        let digits = editor.buffer.line_count().max(1).to_string().len();
+        digits.max(3) + 1
+    }
+
     pub fn draw(
         &mut self,
         editor: &EditorCore,
@@ -30,20 +39,33 @@ impl EditorView {
         highlights: &[Vec<HighlightSpan>],
         status: StatusLine<'_>,
     ) {
+        let gutter = Self::gutter_width(editor);
         let editor_rows = screen.height().saturating_sub(1) as usize;
-        let editor_cols = screen.width() as usize;
+        let editor_cols = (screen.width() as usize).saturating_sub(gutter);
         self.ensure_cursor_visible(editor, editor_rows, editor_cols);
 
+        let number_style = Style {
+            reverse: false,
+            dim: true,
+            fg: None,
+        };
         for row in 0..editor_rows {
             let line_index = self.top_line + row;
             let Some(line) = editor.buffer.line(line_index) else {
                 continue;
             };
+            screen.put_str(
+                0,
+                row as u16,
+                &format!("{:>width$} ", line_index + 1, width = gutter - 1),
+                number_style,
+            );
             draw_line(
                 screen,
                 line,
                 line_index,
                 row as u16,
+                gutter as u16,
                 self.left_col,
                 editor.selection.map(|selection| selection.range()),
                 highlights.get(row).map(Vec::as_slice).unwrap_or(&[]),
@@ -103,17 +125,19 @@ impl EditorView {
         let line = editor.buffer.line(editor.cursor.line)?;
         let col = display_col_for_grapheme(line, editor.cursor.grapheme);
         Some((
-            col.saturating_sub(self.left_col) as u16,
+            (Self::gutter_width(editor) + col.saturating_sub(self.left_col)) as u16,
             editor.cursor.line.saturating_sub(self.top_line) as u16,
         ))
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_line(
     screen: &mut Screen,
     line: &str,
     line_index: usize,
     row: u16,
+    origin_x: u16,
     left_col: usize,
     selection: Option<(Position, Position)>,
     highlights: &[HighlightSpan],
@@ -139,11 +163,11 @@ fn draw_line(
                     fg: color_for_grapheme(highlights, grapheme_index),
                 }
             };
-            let x = display_col.saturating_sub(left_col) as u16;
+            let x = origin_x + display_col.saturating_sub(left_col) as u16;
             screen.put_str(x, row, expanded, style);
         }
         display_col = next_col;
-        if display_col.saturating_sub(left_col) >= usize::from(screen.width()) {
+        if origin_x as usize + display_col.saturating_sub(left_col) >= usize::from(screen.width()) {
             break;
         }
     }
