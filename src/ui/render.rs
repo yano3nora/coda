@@ -6,40 +6,62 @@
 
 use std::io::{self, Write};
 
-use super::{Cell, Screen, Style};
+use super::{Cell, ColorMode, Screen, Style, rgb_to_ansi256};
 
 const CSI: &str = "\x1b[";
 
 pub fn render_full(next: &Screen, out: &mut impl Write) -> io::Result<()> {
+    render_full_with_color_mode(next, ColorMode::detect_from_env(), out)
+}
+
+pub fn render_full_with_color_mode(
+    next: &Screen,
+    color_mode: ColorMode,
+    out: &mut impl Write,
+) -> io::Result<()> {
     write!(out, "{CSI}2J")?;
     for y in 0..next.height() {
-        render_row(next, y, out)?;
+        render_row(next, y, color_mode, out)?;
     }
     render_cursor(next, out)
 }
 
 pub fn render_diff(prev: &Screen, next: &Screen, out: &mut impl Write) -> io::Result<()> {
+    render_diff_with_color_mode(prev, next, ColorMode::detect_from_env(), out)
+}
+
+pub fn render_diff_with_color_mode(
+    prev: &Screen,
+    next: &Screen,
+    color_mode: ColorMode,
+    out: &mut impl Write,
+) -> io::Result<()> {
     if prev.size() != next.size() {
         for y in 0..next.height() {
-            render_row(next, y, out)?;
+            render_row(next, y, color_mode, out)?;
         }
         return render_cursor(next, out);
     }
 
     for y in 0..next.height() {
         if prev.row(y) != next.row(y) {
-            render_row(next, y, out)?;
+            render_row(next, y, color_mode, out)?;
         }
     }
     render_cursor(next, out)
 }
 
-fn render_row(screen: &Screen, y: u16, out: &mut impl Write) -> io::Result<()> {
+fn render_row(
+    screen: &Screen,
+    y: u16,
+    color_mode: ColorMode,
+    out: &mut impl Write,
+) -> io::Result<()> {
     write!(out, "{CSI}{};1H", y + 1)?;
 
     let row = screen.row(y).expect("row index is bounded by caller");
     let mut active_style = Style::default();
-    write_sgr_if_needed(Style::default(), &mut active_style, out)?;
+    write_sgr_if_needed(Style::default(), &mut active_style, color_mode, out)?;
 
     let mut x = 0;
     while x < row.len() {
@@ -49,7 +71,7 @@ fn render_row(screen: &Screen, y: u16, out: &mut impl Write) -> io::Result<()> {
             continue;
         }
 
-        write_sgr_if_needed(cell.style, &mut active_style, out)?;
+        write_sgr_if_needed(cell.style, &mut active_style, color_mode, out)?;
         write_cell(cell, out)?;
         x += usize::from(cell.width.max(1));
     }
@@ -68,6 +90,7 @@ fn write_cell(cell: &Cell, out: &mut impl Write) -> io::Result<()> {
 fn write_sgr_if_needed(
     next: Style,
     active_style: &mut Style,
+    color_mode: ColorMode,
     out: &mut impl Write,
 ) -> io::Result<()> {
     if next == *active_style {
@@ -78,11 +101,18 @@ fn write_sgr_if_needed(
         write!(out, "{CSI}0m")?;
     }
 
-    match (next.reverse, next.dim) {
-        (false, false) => {}
-        (true, false) => write!(out, "{CSI}7m")?,
-        (false, true) => write!(out, "{CSI}2m")?,
-        (true, true) => write!(out, "{CSI}7m{CSI}2m")?,
+    if next.reverse {
+        write!(out, "{CSI}7m")?;
+    }
+    if next.dim {
+        write!(out, "{CSI}2m")?;
+    }
+    if let Some((r, g, b)) = next.fg {
+        match color_mode {
+            ColorMode::TrueColor => write!(out, "{CSI}38;2;{r};{g};{b}m")?,
+            ColorMode::Ansi256 => write!(out, "{CSI}38;5;{}m", rgb_to_ansi256(r, g, b))?,
+            ColorMode::Mono => {}
+        }
     }
     *active_style = next;
     Ok(())
@@ -98,8 +128,8 @@ fn render_cursor(screen: &Screen, out: &mut impl Write) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_diff, render_full};
-    use crate::ui::{Screen, Style};
+    use super::{render_diff, render_full, render_full_with_color_mode};
+    use crate::ui::{ColorMode, Screen, Style};
 
     #[test]
     fn render_full_clears_screen_and_renders_all_rows() {
@@ -147,6 +177,7 @@ mod tests {
             Style {
                 reverse: true,
                 dim: false,
+                fg: None,
             },
         );
         screen.put_str(2, 0, "cd", Style::default());
@@ -168,6 +199,7 @@ mod tests {
             Style {
                 reverse: false,
                 dim: true,
+                fg: None,
             },
         );
         screen.put_str(
@@ -177,12 +209,42 @@ mod tests {
             Style {
                 reverse: true,
                 dim: false,
+                fg: None,
             },
         );
 
         let out = render_to_string(|buffer| render_full(&screen, buffer));
 
         assert!(out.contains("\x1b[2ma\x1b[0m\x1b[7mb\x1b[0m\x1b[K"));
+    }
+
+    #[test]
+    fn foreground_style_serializes_by_color_mode() {
+        let mut screen = Screen::new(1, 1);
+        screen.put_str(
+            0,
+            0,
+            "x",
+            Style {
+                reverse: false,
+                dim: false,
+                fg: Some((255, 0, 0)),
+            },
+        );
+
+        let truecolor = render_to_string(|buffer| {
+            render_full_with_color_mode(&screen, ColorMode::TrueColor, buffer)
+        });
+        let ansi256 = render_to_string(|buffer| {
+            render_full_with_color_mode(&screen, ColorMode::Ansi256, buffer)
+        });
+        let mono = render_to_string(|buffer| {
+            render_full_with_color_mode(&screen, ColorMode::Mono, buffer)
+        });
+
+        assert!(truecolor.contains("\x1b[38;2;255;0;0mx"));
+        assert!(ansi256.contains("\x1b[38;5;196mx"));
+        assert!(!mono.contains("38;"));
     }
 
     #[test]

@@ -13,6 +13,8 @@ use unicode_width::UnicodeWidthStr;
 pub struct Style {
     pub reverse: bool,
     pub dim: bool,
+    /// Foreground RGB color. Background intentionally stays terminal-owned.
+    pub fg: Option<(u8, u8, u8)>,
 }
 
 /// One terminal grid cell.

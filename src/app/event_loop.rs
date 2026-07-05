@@ -10,6 +10,7 @@ use libc::{POLLIN, STDIN_FILENO, pollfd};
 
 use crate::{
     core::editor::{EditorCore, Motion},
+    highlight::{HighlightCache, HighlightEngine, ThemeChoice},
     input::{
         BracketedPasteGuard, InputEvent, Key, KeyEvent, KeyboardProtocolGuard, Modifiers,
         RawModeGuard, drain_input_events, flush_pending_escape,
@@ -60,6 +61,8 @@ pub struct EventLoop {
     editor: EditorCore,
     resolver: Resolver,
     view: EditorView,
+    highlight_engine: HighlightEngine,
+    highlight_cache: HighlightCache,
     palette: CommandPalette,
     search: SearchOverlay,
     saved_snapshot: Vec<u8>,
@@ -76,6 +79,7 @@ impl EventLoop {
         path: PathBuf,
         mut warnings: Vec<String>,
         user_bindings: Vec<crate::keymap::Binding>,
+        theme: ThemeChoice,
     ) -> Result<Self, file::LoadError> {
         let (buffer, load_info) = file::open(&path)?;
         if load_info.is_new {
@@ -92,6 +96,8 @@ impl EventLoop {
             editor: EditorCore::new(buffer),
             resolver: Resolver::new(bindings),
             view: EditorView::default(),
+            highlight_engine: HighlightEngine::new(theme),
+            highlight_cache: HighlightCache::default(),
             palette: CommandPalette::default(),
             search: SearchOverlay::default(),
             saved_snapshot,
@@ -176,9 +182,17 @@ impl EventLoop {
             .and_then(|name| name.to_str())
             .unwrap_or("[No Name]")
             .to_string();
+        let editor_rows = screen.height().saturating_sub(1) as usize;
+        let highlights = self.highlight_cache.spans_for(
+            &self.editor.buffer,
+            self.view.top_line..self.view.top_line + editor_rows,
+            &self.highlight_engine,
+            self.highlight_engine.syntax_for_path(&self.path),
+        );
         self.view.draw(
             &self.editor,
             screen,
+            &highlights,
             StatusLine {
                 filename: &filename,
                 modified: self.is_modified(),
@@ -589,6 +603,7 @@ fn format_candidates(candidates: &[(Vec<KeyEvent>, EditorAction)]) -> String {
 mod tests {
     use super::{EventLoop, QuitDecision, QuitGuard};
     use crate::{
+        highlight::ThemeChoice,
         input::{InputEvent, Key, KeyEvent},
         keymap::EditorAction,
     };
@@ -601,7 +616,8 @@ mod tests {
     fn palette_app_quit_propagates_quit_decision_when_clean() {
         let path = std::env::temp_dir().join("coda-test-palette-quit.txt");
         std::fs::write(&path, b"abc\n").unwrap();
-        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
 
         assert_eq!(
             event_loop.handle_key(KeyEvent::plain(Key::F(1))),
@@ -623,7 +639,8 @@ mod tests {
     fn bracketed_paste_input_inserts_text_without_key_resolution() {
         let path = std::env::temp_dir().join("coda-test-paste-input.txt");
         std::fs::write(&path, b"").unwrap();
-        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
 
         assert_eq!(
             event_loop.handle_input_event(InputEvent::Paste("a\x1b[Ab".to_string())),
@@ -640,7 +657,8 @@ mod tests {
     fn paste_into_overlays_strips_newlines() {
         let path = std::env::temp_dir().join("coda-test-paste-overlay.txt");
         std::fs::write(&path, b"abc\n").unwrap();
-        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
 
         event_loop.handle_key(KeyEvent::plain(Key::F(1)));
         event_loop.handle_input_event(InputEvent::Paste("a\nb".to_string()));
@@ -657,7 +675,8 @@ mod tests {
     fn copy_cut_and_internal_paste_update_clipboard_and_osc52_queue() {
         let path = std::env::temp_dir().join("coda-test-clipboard-actions.txt");
         std::fs::write(&path, b"foo\nbar").unwrap();
-        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
 
         event_loop.dispatch(EditorAction::EditCopy);
         assert_eq!(event_loop.clipboard, "foo\n");
@@ -692,7 +711,8 @@ mod tests {
     fn context_reflects_search_and_replace_overlay_focus() {
         let path = std::env::temp_dir().join("coda-test-search-context.txt");
         std::fs::write(&path, b"abc\n").unwrap();
-        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
 
         event_loop.dispatch(crate::keymap::EditorAction::ReplaceOpen);
         let context = event_loop.context();

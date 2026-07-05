@@ -210,6 +210,7 @@ pub fn draw_search_overlay(screen: &mut Screen, overlay: &SearchOverlay) {
     let dim = Style {
         reverse: false,
         dim: true,
+        fg: None,
     };
     let width = usize::from(screen.width());
     let total = overlay.match_count();

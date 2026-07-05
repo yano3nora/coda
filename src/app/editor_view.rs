@@ -5,6 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     core::{editor::EditorCore, position::Position},
+    highlight::HighlightSpan,
     ui::{Screen, Style},
 };
 
@@ -22,7 +23,13 @@ pub struct StatusLine<'a> {
 }
 
 impl EditorView {
-    pub fn draw(&mut self, editor: &EditorCore, screen: &mut Screen, status: StatusLine<'_>) {
+    pub fn draw(
+        &mut self,
+        editor: &EditorCore,
+        screen: &mut Screen,
+        highlights: &[Vec<HighlightSpan>],
+        status: StatusLine<'_>,
+    ) {
         let editor_rows = screen.height().saturating_sub(1) as usize;
         let editor_cols = screen.width() as usize;
         self.ensure_cursor_visible(editor, editor_rows, editor_cols);
@@ -39,6 +46,7 @@ impl EditorView {
                 row as u16,
                 self.left_col,
                 editor.selection.map(|selection| selection.range()),
+                highlights.get(row).map(Vec::as_slice).unwrap_or(&[]),
             );
         }
 
@@ -57,6 +65,7 @@ impl EditorView {
                 Style {
                     reverse: true,
                     dim: false,
+                    fg: None,
                 },
             );
         }
@@ -107,6 +116,7 @@ fn draw_line(
     row: u16,
     left_col: usize,
     selection: Option<(Position, Position)>,
+    highlights: &[HighlightSpan],
 ) {
     let mut display_col = 0;
     for (grapheme_index, grapheme) in line.graphemes(true).enumerate() {
@@ -118,9 +128,16 @@ fn draw_line(
                 Style {
                     reverse: true,
                     dim: false,
+                    fg: None,
                 }
-            } else {
+            } else if grapheme == "\t" {
                 Style::default()
+            } else {
+                Style {
+                    reverse: false,
+                    dim: false,
+                    fg: color_for_grapheme(highlights, grapheme_index),
+                }
             };
             let x = display_col.saturating_sub(left_col) as u16;
             screen.put_str(x, row, expanded, style);
@@ -147,4 +164,11 @@ fn display_col_for_grapheme(line: &str, target: usize) -> usize {
             UnicodeWidthStr::width(grapheme).max(1)
         }
     })
+}
+
+fn color_for_grapheme(highlights: &[HighlightSpan], grapheme_index: usize) -> Option<(u8, u8, u8)> {
+    highlights
+        .iter()
+        .find(|(range, _)| range.contains(&grapheme_index))
+        .map(|(_, rgb)| *rgb)
 }

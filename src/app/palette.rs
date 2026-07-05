@@ -103,10 +103,12 @@ pub fn draw_palette(screen: &mut Screen, palette: &CommandPalette, items: &[Pale
     let reverse = Style {
         reverse: true,
         dim: false,
+        fg: None,
     };
     let dim = Style {
         reverse: false,
         dim: true,
+        fg: None,
     };
     let normal = Style::default();
 

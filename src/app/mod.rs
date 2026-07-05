@@ -61,7 +61,12 @@ fn run_editor(paths: Vec<PathBuf>) -> i32 {
     let loaded_config = config::load();
     warnings.extend(loaded_config.warnings);
 
-    match EventLoop::open(paths[0].clone(), warnings, loaded_config.user_bindings) {
+    match EventLoop::open(
+        paths[0].clone(),
+        warnings,
+        loaded_config.user_bindings,
+        loaded_config.theme,
+    ) {
         Ok(loop_) => match loop_.run() {
             Ok(()) => 0,
             Err(error) => {
