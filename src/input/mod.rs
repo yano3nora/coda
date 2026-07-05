@@ -6,7 +6,7 @@
 
 mod decoder;
 mod key_event;
-mod raw_terminal;
+pub(crate) mod raw_terminal;
 
 use std::io::{self, Read, Write};
 

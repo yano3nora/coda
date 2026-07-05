@@ -24,15 +24,24 @@ static SIGNAL_RESTORE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SIGNAL_RESTORE_FD: AtomicI32 = AtomicI32::new(-1);
 static mut SIGNAL_RESTORE_TERMIOS: MaybeUninit<Termios> = MaybeUninit::uninit();
 static KEYBOARD_PROTOCOL_PUSHED: AtomicBool = AtomicBool::new(false);
+static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// kitty keyboard protocol: pop the flags we pushed (`CSI < u`).
 const KITTY_POP: &[u8] = b"\x1b[<u";
+/// Alternate screen: show cursor and return to the main screen.
+const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?25h\x1b[?1049l";
 
 /// Tracks whether a kitty protocol mode was pushed, so the signal handler can
 /// pop it before exiting. Leaving the mode pushed would corrupt the shell's
 /// key handling after an abnormal exit.
 pub(crate) fn set_keyboard_protocol_pushed(pushed: bool) {
     KEYBOARD_PROTOCOL_PUSHED.store(pushed, Ordering::SeqCst);
+}
+
+/// Tracks whether alternate screen mode is active, so the signal handler can
+/// restore the user's shell view before keyboard protocol and termios cleanup.
+pub(crate) fn set_alt_screen_active(active: bool) {
+    ALT_SCREEN_ACTIVE.store(active, Ordering::SeqCst);
 }
 
 /// Restores the original terminal attributes when dropped.
@@ -121,6 +130,11 @@ fn disarm_signal_restore() {
 
 extern "C" fn restore_then_exit(signal_number: libc::c_int) {
     // Only async-signal-safe calls are allowed here (write / tcsetattr / _exit are).
+    if ALT_SCREEN_ACTIVE.load(Ordering::SeqCst) {
+        unsafe {
+            libc::write(1, ALT_SCREEN_LEAVE.as_ptr().cast(), ALT_SCREEN_LEAVE.len());
+        }
+    }
     if KEYBOARD_PROTOCOL_PUSHED.load(Ordering::SeqCst) {
         unsafe {
             libc::write(1, KITTY_POP.as_ptr().cast(), KITTY_POP.len());
