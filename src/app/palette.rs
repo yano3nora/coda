@@ -37,6 +37,11 @@ impl CommandPalette {
         self.selected = 0;
     }
 
+    pub fn push_text(&mut self, text: &str) {
+        self.query.push_str(text);
+        self.selected = 0;
+    }
+
     pub fn backspace(&mut self) {
         self.query.pop();
         self.selected = 0;

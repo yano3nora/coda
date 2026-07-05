@@ -13,6 +13,16 @@ pub enum DecodeResult {
     Incomplete,
 }
 
+/// Normalized input events emitted by the terminal input layer.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum InputEvent {
+    Key(KeyEvent),
+    Paste(String),
+}
+
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
 /// Decodes a byte slice into normalized key events.
 pub fn decode_key_events(bytes: &[u8]) -> DecodeResult {
     let mut pending = bytes.to_vec();
@@ -31,13 +41,43 @@ pub fn decode_key_events(bytes: &[u8]) -> DecodeResult {
 /// suffix in `buffer` so the event loop can append the next chunk before
 /// trying again.
 pub fn drain_key_events(buffer: &mut Vec<u8>) -> Vec<KeyEvent> {
+    drain_input_events(buffer)
+        .into_iter()
+        .filter_map(|event| match event {
+            InputEvent::Key(key) => Some(key),
+            InputEvent::Paste(_) => None,
+        })
+        .collect()
+}
+
+/// Drains complete normalized input events from a streaming byte buffer.
+///
+/// Bracketed paste envelopes are emitted as a single [`InputEvent::Paste`]. The
+/// pasted bytes are never recursively decoded as keys, so escape sequences
+/// inside pasted text remain literal text. If the closing envelope has not
+/// arrived yet, the whole paste prefix is retained for the next read chunk.
+pub fn drain_input_events(buffer: &mut Vec<u8>) -> Vec<InputEvent> {
     let mut events = Vec::new();
     let mut offset = 0;
 
     while offset < buffer.len() {
-        match decode_one(&buffer[offset..]) {
+        let remaining = &buffer[offset..];
+        if remaining.starts_with(BRACKETED_PASTE_START) {
+            let content_start = offset + BRACKETED_PASTE_START.len();
+            let Some(relative_end) = find_subslice(&buffer[content_start..], BRACKETED_PASTE_END)
+            else {
+                break;
+            };
+            let content_end = content_start + relative_end;
+            let text = normalize_paste_text(&buffer[content_start..content_end]);
+            events.push(InputEvent::Paste(text));
+            offset = content_end + BRACKETED_PASTE_END.len();
+            continue;
+        }
+
+        match decode_one(remaining) {
             One::Event(event, consumed) => {
-                events.push(event);
+                events.push(InputEvent::Key(event));
                 offset += consumed;
             }
             One::Incomplete => break,
@@ -62,6 +102,18 @@ pub fn flush_pending_escape(buffer: &mut Vec<u8>) -> Option<KeyEvent> {
     } else {
         None
     }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn normalize_paste_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
 }
 
 enum One {
@@ -275,7 +327,10 @@ fn legacy_modifiers(encoded: Option<u16>) -> Modifiers {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeResult, decode_key_events, drain_key_events, flush_pending_escape};
+    use super::{
+        DecodeResult, InputEvent, decode_key_events, drain_input_events, drain_key_events,
+        flush_pending_escape,
+    };
     use crate::input::{Key, KeyEvent, Modifiers};
 
     #[test]
@@ -408,6 +463,75 @@ mod tests {
                 KeyEvent::plain(Key::Char('b'))
             ])
         );
+    }
+
+    #[test]
+    fn bracketed_paste_envelope_cases_are_stream_safe() {
+        let cases = [
+            (
+                "single chunk",
+                vec![b"\x1b[200~hello\x1b[201~".to_vec()],
+                vec![InputEvent::Paste("hello".to_string())],
+            ),
+            (
+                "split into envelope body and end",
+                vec![
+                    b"\x1b[200~".to_vec(),
+                    b"hello".to_vec(),
+                    b"\x1b[201~".to_vec(),
+                ],
+                vec![InputEvent::Paste("hello".to_string())],
+            ),
+            (
+                "escape sequence remains pasted text",
+                vec![b"\x1b[200~a\x1b[Ab\x1b[201~".to_vec()],
+                vec![InputEvent::Paste("a\x1b[Ab".to_string())],
+            ),
+            (
+                "crlf and cr normalize to lf",
+                vec![b"\x1b[200~a\r\nb\rc\x1b[201~".to_vec()],
+                vec![InputEvent::Paste("a\nb\nc".to_string())],
+            ),
+        ];
+
+        for (name, chunks, expected) in cases {
+            let mut buffer = Vec::new();
+            let mut actual = Vec::new();
+            for chunk in chunks {
+                buffer.extend_from_slice(&chunk);
+                actual.extend(drain_input_events(&mut buffer));
+            }
+            assert_eq!(actual, expected, "case {name}");
+            assert!(buffer.is_empty(), "case {name}");
+        }
+    }
+
+    #[test]
+    fn bracketed_paste_keeps_incomplete_envelope_buffered() {
+        let mut buffer = b"\x1b[200~hello".to_vec();
+        assert_eq!(drain_input_events(&mut buffer), Vec::new());
+        assert_eq!(buffer, b"\x1b[200~hello");
+
+        buffer.extend_from_slice(b"\x1b[201~");
+        assert_eq!(
+            drain_input_events(&mut buffer),
+            vec![InputEvent::Paste("hello".to_string())]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn keys_around_paste_remain_key_events() {
+        let mut buffer = b"a\x1b[200~\x1b[A\x1b[201~b".to_vec();
+        assert_eq!(
+            drain_input_events(&mut buffer),
+            vec![
+                InputEvent::Key(KeyEvent::plain(Key::Char('a'))),
+                InputEvent::Paste("\x1b[A".to_string()),
+                InputEvent::Key(KeyEvent::plain(Key::Char('b'))),
+            ]
+        );
+        assert!(buffer.is_empty());
     }
 
     fn complete<const N: usize>(events: [KeyEvent; N]) -> DecodeResult {

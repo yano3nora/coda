@@ -18,8 +18,8 @@
 
 ### input 層
 
-- [ ] bracketed paste mode の管理: `CSI ?2004h` を有効化し、drop / signal 時に `?2004l` で解除する(`KeyboardProtocolGuard` と同じ AtomicBool + RAII パターン。有効化は kitty push と同タイミングでよい)
-- [ ] decoder に paste 対応を追加: `\x1b[200~ ... \x1b[201~` の envelope を検出する
+- [x] bracketed paste mode の管理: `CSI ?2004h` を有効化し、drop / signal 時に `?2004l` で解除する(`KeyboardProtocolGuard` と同じ AtomicBool + RAII パターン。有効化は kitty push と同タイミングでよい)
+- [x] decoder に paste 対応を追加: `\x1b[200~ ... \x1b[201~` の envelope を検出する
     - 既存 `drain_key_events` を `drain_input_events(buffer) -> Vec<InputEvent>` に拡張(`enum InputEvent { Key(KeyEvent), Paste(String) }`。既存呼び出しは互換 wrapper でも移行でもよいが、event loop は InputEvent を受ける)
     - envelope が read 境界で分割されても正しく結合する(終端 `201~` が来るまで buffer に保持)
     - **paste 内容は一切 key 解決しない**(SPEC-0003)。内容中の escape sequence も文字列として扱う。不正 UTF-8 は lossy 変換でよい(表示用入力のため)
@@ -27,37 +27,39 @@
 
 ### core / app 層
 
-- [ ] `EditorAction` に `edit.copy` / `edit.cut` / `edit.paste` を追加(Display / FromStr / ALL)
-- [ ] `EditorCore`:
+- [x] `EditorAction` に `edit.copy` / `edit.cut` / `edit.paste` を追加(Display / FromStr / ALL)
+- [x] `EditorCore`:
     - `copy_text() -> Option<String>`: selection のテキスト。**selection が無い場合は現在行全体 + 改行**(VS Code の line copy)
     - `cut()`: copy 相当のテキストを返しつつ削除(selection 無しは行削除)。1 undo グループ
     - paste は既存 `insert_text`(selection 置換込み)で足りる
-- [ ] 内部 clipboard(`String`)を event loop に保持。copy / cut で更新、`edit.paste` で挿入
-- [ ] OSC 52 書込: copy / cut 時に `\x1b]52;c;{base64}\x07` を stdout に出す
+- [x] 内部 clipboard(`String`)を event loop に保持。copy / cut で更新、`edit.paste` で挿入
+- [x] OSC 52 書込: copy / cut 時に `\x1b]52;c;{base64}\x07` を stdout に出す
     - base64 encoder は自前実装(新規依存禁止。標準 alphabet、padding あり。RFC 4648 のテストベクタで検証)
     - 巨大 selection の対策として 1MB 超は OSC 52 送信をスキップし内部 clipboard のみ(status bar に明示)
-- [ ] event loop:
+- [x] event loop:
     - `InputEvent::Paste(text)` → palette / search overlay 表示中は「改行を除去して focus 中の入力欄へ」、editor なら `insert_text`(1 undo グループ)
     - copy / cut 実行時に status bar へ `copied` / `cut` 表示
-- [ ] default bindings: `ctrl+c` → `edit.copy`、`ctrl+x` → `edit.cut`、`ctrl+v` → `edit.paste`(`Source::Default`。ADR-0002 で温存していた `Ctrl+C` の本来用途)
+- [x] default bindings: `ctrl+c` → `edit.copy`、`ctrl+x` → `edit.cut`、`ctrl+v` → `edit.paste`(`Source::Default`。ADR-0002 で温存していた `Ctrl+C` の本来用途)
 
 ## testcases
 
-- [ ] base64: RFC 4648 ベクタ(`""`→`""`、`"f"`→`"Zg=="`、`"fo"`→`"Zm8="`、`"foo"`→`"Zm9v"`)+ 日本語バイト列
-- [ ] paste envelope: 一括到着 / `200~` と本文と `201~` が 3 chunk に分割 / 本文に `\x1b[A` を含む(key にならず文字列として出る)/ CRLF 正規化
-- [ ] paste 中に通常 key が混ざらない(envelope 前後の key は正しく Key event になる)
-- [ ] `copy_text`: selection あり / なし(行 copy)/ 空 buffer
-- [ ] `cut`: selection 削除と行削除、undo 1 回で復元
-- [ ] OSC 52 出力形式(`\x1b]52;c;Zm9v\x07`)
-- [ ] `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` がすべて通る
+- [x] base64: RFC 4648 ベクタ(`""`→`""`、`"f"`→`"Zg=="`、`"fo"`→`"Zm8="`、`"foo"`→`"Zm9v"`)+ 日本語バイト列
+- [x] paste envelope: 一括到着 / `200~` と本文と `201~` が 3 chunk に分割 / 本文に `\x1b[A` を含む(key にならず文字列として出る)/ CRLF 正規化
+- [x] paste 中に通常 key が混ざらない(envelope 前後の key は正しく Key event になる)
+- [x] `copy_text`: selection あり / なし(行 copy)/ 空 buffer
+- [x] `cut`: selection 削除と行削除、undo 1 回で復元
+- [x] OSC 52 出力形式(`\x1b]52;c;Zm9v\x07`)
+- [x] `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` がすべて通る
 
 手動(main agent PTY + 人間):
 
-- [ ] PTY: bracketed paste envelope 送信でテキストが挿入され、内容の escape が実行されない
-- [ ] PTY: ctrl+c で OSC 52 sequence が出力に現れ、base64 decode すると copy したテキストに一致
+- [x] PTY: bracketed paste envelope 送信でテキストが挿入され、内容の escape が実行されない (evil\x1b[Atext が文字として挿入、cursor 不動)
+- [x] PTY: ctrl+c で OSC 52 sequence が出力に現れ、base64 decode すると copy したテキストに一致 (hello clipboard)
 - [ ] 人間: Ghostty で copy → 他アプリに Cmd+V で貼れる(clipboard-write の許可 prompt が出る場合あり)
 
 ## notes
+
+- レビュー指摘なし (2026-07-06 main agent PTY 検証済み)。Ghostty での他アプリ貼り付け確認は人間待ち
 
 - 新規依存 crate の追加は禁止(base64 は 20 行程度の自前実装で足りる)
 - OSC 52 の terminal 側許可(Ghostty `clipboard-write`)は環境依存。拒否されても内部 clipboard は機能する(ADR-0008 の fallback 設計)

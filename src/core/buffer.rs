@@ -141,6 +141,33 @@ impl TextBuffer {
         cursor
     }
 
+    /// Returns the text in a grapheme range without mutating the buffer.
+    pub fn text_range(&self, start: Position, end: Position) -> String {
+        let (start, end) = self.normalized_range(start, end);
+        if start == end {
+            return String::new();
+        }
+
+        if start.line == end.line {
+            let line = &self.lines[start.line];
+            let start_byte = grapheme_to_byte(line, start.grapheme);
+            let end_byte = grapheme_to_byte(line, end.grapheme);
+            return line[start_byte..end_byte].to_string();
+        }
+
+        let start_byte = grapheme_to_byte(&self.lines[start.line], start.grapheme);
+        let end_byte = grapheme_to_byte(&self.lines[end.line], end.grapheme);
+        let mut text = String::new();
+        text.push_str(&self.lines[start.line][start_byte..]);
+        for line_index in start.line + 1..end.line {
+            text.push('\n');
+            text.push_str(&self.lines[line_index]);
+        }
+        text.push('\n');
+        text.push_str(&self.lines[end.line][..end_byte]);
+        text
+    }
+
     /// Deletes a grapheme range and returns the removed text for undo replay.
     ///
     /// Ranges are normalized after clamping, so callers may pass reversed or

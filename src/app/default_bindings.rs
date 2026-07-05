@@ -250,6 +250,24 @@ const DEFAULTS: &[(&str, EditorAction, Option<&str>, Source)] = &[
         Source::Default,
     ),
     (
+        "ctrl+c",
+        EditorAction::EditCopy,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
+        "ctrl+x",
+        EditorAction::EditCut,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
+        "ctrl+v",
+        EditorAction::EditPaste,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
         "ctrl+z",
         EditorAction::EditUndo,
         Some("textInputFocus"),
@@ -339,6 +357,28 @@ mod tests {
             resolver.resolve(&["cmd+left".parse().unwrap()], &EditorContext::default()),
             ResolveResult::Matched(EditorAction::CursorLineStart)
         );
+    }
+
+    #[test]
+    fn clipboard_default_bindings_parse_and_resolve() {
+        let resolver = Resolver::new(bindings());
+        let context = EditorContext {
+            text_input_focus: true,
+            ..EditorContext::default()
+        };
+        let cases = [
+            ("ctrl+c", EditorAction::EditCopy),
+            ("ctrl+x", EditorAction::EditCut),
+            ("ctrl+v", EditorAction::EditPaste),
+        ];
+
+        for (key, action) in cases {
+            assert_eq!(
+                resolver.resolve(&[key.parse().unwrap()], &context),
+                ResolveResult::Matched(action),
+                "{key}"
+            );
+        }
     }
 
     #[test]

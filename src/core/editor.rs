@@ -144,6 +144,44 @@ impl EditorCore {
         );
     }
 
+    /// Returns the selected text, or the current logical line plus LF when no
+    /// selection is active (VS Code-style line copy).
+    pub fn copy_text(&self) -> Option<String> {
+        if self.buffer.line_count() == 0 {
+            return None;
+        }
+        if let Some(selection) = self.selection
+            && !selection.is_empty()
+        {
+            let (start, end) = selection.range();
+            return Some(self.buffer.text_range(start, end));
+        }
+
+        let line = self
+            .cursor
+            .line
+            .min(self.buffer.line_count().saturating_sub(1));
+        Some(format!(
+            "{}\n",
+            self.buffer.line(line).expect("line index is clamped")
+        ))
+    }
+
+    /// Cuts the selected text, or the current logical line when no selection is
+    /// active. The deletion is recorded as one undo group.
+    pub fn cut(&mut self) -> Option<String> {
+        let copied = self.copy_text()?;
+        if self
+            .selection
+            .is_some_and(|selection| !selection.is_empty())
+        {
+            self.delete_selection_as_group();
+        } else {
+            self.delete_line();
+        }
+        Some(copied)
+    }
+
     /// Deletes the selection, previous grapheme, or joins with the previous line.
     pub fn backspace(&mut self) {
         if self.delete_selection_as_group() {
@@ -982,6 +1020,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn copy_text_selection_line_and_empty_buffer_cases() {
+        let mut selected = editor("abc\ndef");
+        selected.select_range(Position::new(0, 1), Position::new(1, 2));
+        assert_eq!(selected.copy_text(), Some("bc\nde".to_string()));
+
+        let mut line = editor("abc\ndef");
+        line.cursor = Position::new(1, 1);
+        assert_eq!(line.copy_text(), Some("def\n".to_string()));
+
+        let empty = editor("");
+        assert_eq!(empty.copy_text(), Some("\n".to_string()));
+    }
+
+    #[test]
+    fn cut_selection_and_line_delete_are_single_undo_groups() {
+        let mut selected = editor("abc\ndef");
+        selected.select_range(Position::new(0, 1), Position::new(1, 2));
+        assert_eq!(selected.cut(), Some("bc\nde".to_string()));
+        assert_eq!(text(&selected), "af");
+        assert!(selected.undo());
+        assert_eq!(text(&selected), "abc\ndef");
+
+        let mut line = editor("abc\ndef\nghi");
+        line.cursor = Position::new(1, 1);
+        assert_eq!(line.cut(), Some("def\n".to_string()));
+        assert_eq!(text(&line), "abc\nghi");
+        assert!(line.undo());
+        assert_eq!(text(&line), "abc\ndef\nghi");
     }
 
     #[test]

@@ -11,15 +11,15 @@ use libc::{POLLIN, STDIN_FILENO, pollfd};
 use crate::{
     core::editor::{EditorCore, Motion},
     input::{
-        Key, KeyEvent, KeyboardProtocolGuard, Modifiers, RawModeGuard, drain_key_events,
-        flush_pending_escape,
+        BracketedPasteGuard, InputEvent, Key, KeyEvent, KeyboardProtocolGuard, Modifiers,
+        RawModeGuard, drain_input_events, flush_pending_escape,
     },
     keymap::{EditorAction, EditorContext, ResolveResult, Resolver},
     ui::{AltScreenGuard, Screen, render_diff, render_full, take_pending_resize, terminal_size},
 };
 
 use super::{
-    default_bindings,
+    clipboard, default_bindings,
     editor_view::{EditorView, StatusLine},
     file,
     palette::{CommandPalette, filter_actions},
@@ -64,6 +64,8 @@ pub struct EventLoop {
     search: SearchOverlay,
     saved_snapshot: Vec<u8>,
     message: String,
+    clipboard: String,
+    pending_terminal_write: Vec<u8>,
     pending_keys: Vec<KeyEvent>,
     pending_since: Option<Instant>,
     quit_guard: QuitGuard,
@@ -94,6 +96,8 @@ impl EventLoop {
             search: SearchOverlay::default(),
             saved_snapshot,
             message: warnings.join("; "),
+            clipboard: String::new(),
+            pending_terminal_write: Vec::new(),
             pending_keys: Vec::new(),
             pending_since: None,
             quit_guard: QuitGuard::default(),
@@ -110,6 +114,7 @@ impl EventLoop {
         // declaration) pops the protocol while still on the alt screen.
         let mut alt = AltScreenGuard::enter(stdout)?;
         let _keyboard = KeyboardProtocolGuard::push(alt.writer_mut())?;
+        let _paste = BracketedPasteGuard::enable(alt.writer_mut())?;
         let mut stdin = io::stdin().lock();
         let mut byte_buffer = Vec::new();
         let (width, height) = terminal_size().unwrap_or((80, 24));
@@ -136,15 +141,17 @@ impl EventLoop {
                     break;
                 }
                 byte_buffer.extend_from_slice(&chunk[..read]);
-                for event in drain_key_events(&mut byte_buffer) {
-                    if self.handle_key(event) == QuitDecision::Quit {
+                for event in drain_input_events(&mut byte_buffer) {
+                    if self.handle_input_event(event) == QuitDecision::Quit {
                         return Ok(());
                     }
                 }
-            } else if let Some(event) = flush_pending_escape(&mut byte_buffer)
-                && self.handle_key(event) == QuitDecision::Quit
-            {
-                return Ok(());
+                self.flush_terminal_writes(alt.writer_mut())?;
+            } else if let Some(event) = flush_pending_escape(&mut byte_buffer) {
+                if self.handle_key(event) == QuitDecision::Quit {
+                    return Ok(());
+                }
+                self.flush_terminal_writes(alt.writer_mut())?;
             }
 
             if self.handle_sequence_timeout() == QuitDecision::Quit {
@@ -182,6 +189,37 @@ impl EventLoop {
         let items = filter_actions(&self.palette.query, self.resolver.bindings());
         draw_search_overlay(screen, &self.search);
         super::palette::draw_palette(screen, &self.palette, &items);
+    }
+
+    fn handle_input_event(&mut self, event: InputEvent) -> QuitDecision {
+        match event {
+            InputEvent::Key(key) => self.handle_key(key),
+            InputEvent::Paste(text) => self.handle_paste_input(&text),
+        }
+    }
+
+    fn handle_paste_input(&mut self, text: &str) -> QuitDecision {
+        let sanitized = text.replace('\n', "");
+        if self.palette.visible {
+            self.palette.push_text(&sanitized);
+        } else if self.search.visible {
+            self.search.paste_text(&sanitized, &mut self.editor);
+        } else {
+            self.editor.insert_text(text);
+            self.editor.commit_group();
+            self.quit_guard.reset();
+        }
+        QuitDecision::Continue
+    }
+
+    fn flush_terminal_writes(&mut self, writer: &mut impl Write) -> io::Result<()> {
+        if self.pending_terminal_write.is_empty() {
+            return Ok(());
+        }
+        writer.write_all(&self.pending_terminal_write)?;
+        writer.flush()?;
+        self.pending_terminal_write.clear();
+        Ok(())
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> QuitDecision {
@@ -333,6 +371,25 @@ impl EventLoop {
             EditorAction::EditInsertLineBefore => self.editor.insert_line_before(),
             EditorAction::EditMoveLinesUp => self.editor.move_lines_up(),
             EditorAction::EditMoveLinesDown => self.editor.move_lines_down(),
+            EditorAction::EditCopy => {
+                if let Some(text) = self.editor.copy_text() {
+                    self.copy_to_clipboards(text, "copied");
+                }
+            }
+            EditorAction::EditCut => {
+                if let Some(text) = self.editor.cut() {
+                    self.copy_to_clipboards(text, "cut");
+                    self.quit_guard.reset();
+                }
+            }
+            EditorAction::EditPaste => {
+                if !self.clipboard.is_empty() {
+                    let text = self.clipboard.clone();
+                    self.editor.insert_text(&text);
+                    self.editor.commit_group();
+                    self.quit_guard.reset();
+                }
+            }
             EditorAction::EditUndo => {
                 if !self.editor.undo() {
                     self.message = "nothing to undo".to_string();
@@ -410,6 +467,16 @@ impl EventLoop {
             other => self.message = format!("{other}: not implemented yet"),
         }
         QuitDecision::Continue
+    }
+
+    fn copy_to_clipboards(&mut self, text: String, status: &str) {
+        self.clipboard = text;
+        if let Some(sequence) = clipboard::osc52_copy_sequence(&self.clipboard) {
+            self.pending_terminal_write.extend(sequence);
+            self.message = status.to_string();
+        } else {
+            self.message = format!("{status}; OSC 52 skipped (>1MB)");
+        }
     }
 
     fn handle_sequence_timeout(&mut self) -> QuitDecision {
@@ -521,7 +588,14 @@ fn format_candidates(candidates: &[(Vec<KeyEvent>, EditorAction)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{EventLoop, QuitDecision, QuitGuard};
-    use crate::input::{Key, KeyEvent};
+    use crate::{
+        input::{InputEvent, Key, KeyEvent},
+        keymap::EditorAction,
+    };
+
+    fn buffer_text(event_loop: &EventLoop) -> String {
+        String::from_utf8(event_loop.editor.buffer.to_bytes()).unwrap()
+    }
 
     #[test]
     fn palette_app_quit_propagates_quit_decision_when_clean() {
@@ -542,6 +616,62 @@ mod tests {
             QuitDecision::Quit,
             "palette app.quit on a clean buffer must quit"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bracketed_paste_input_inserts_text_without_key_resolution() {
+        let path = std::env::temp_dir().join("coda-test-paste-input.txt");
+        std::fs::write(&path, b"").unwrap();
+        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+
+        assert_eq!(
+            event_loop.handle_input_event(InputEvent::Paste("a\x1b[Ab".to_string())),
+            QuitDecision::Continue
+        );
+
+        assert_eq!(buffer_text(&event_loop), "a\x1b[Ab");
+        assert!(event_loop.editor.undo(), "whole paste is one undo group");
+        assert_eq!(buffer_text(&event_loop), "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn paste_into_overlays_strips_newlines() {
+        let path = std::env::temp_dir().join("coda-test-paste-overlay.txt");
+        std::fs::write(&path, b"abc\n").unwrap();
+        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+
+        event_loop.handle_key(KeyEvent::plain(Key::F(1)));
+        event_loop.handle_input_event(InputEvent::Paste("a\nb".to_string()));
+        assert_eq!(event_loop.palette.query, "ab");
+
+        event_loop.palette.close();
+        event_loop.dispatch(EditorAction::SearchOpen);
+        event_loop.handle_input_event(InputEvent::Paste("x\ny".to_string()));
+        assert_eq!(event_loop.search.query, "xy");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn copy_cut_and_internal_paste_update_clipboard_and_osc52_queue() {
+        let path = std::env::temp_dir().join("coda-test-clipboard-actions.txt");
+        std::fs::write(&path, b"foo\nbar").unwrap();
+        let mut event_loop = EventLoop::open(path.clone(), Vec::new(), Vec::new()).unwrap();
+
+        event_loop.dispatch(EditorAction::EditCopy);
+        assert_eq!(event_loop.clipboard, "foo\n");
+        assert_eq!(event_loop.pending_terminal_write, b"\x1b]52;c;Zm9vCg==\x07");
+        assert_eq!(event_loop.message, "copied");
+        event_loop.pending_terminal_write.clear();
+
+        event_loop.dispatch(EditorAction::EditCut);
+        assert_eq!(event_loop.clipboard, "foo\n");
+        assert_eq!(buffer_text(&event_loop), "bar");
+        assert_eq!(event_loop.message, "cut");
+
+        event_loop.dispatch(EditorAction::EditPaste);
+        assert_eq!(buffer_text(&event_loop), "foo\nbar");
         let _ = std::fs::remove_file(path);
     }
 

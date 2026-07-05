@@ -10,7 +10,10 @@ pub(crate) mod raw_terminal;
 
 use std::io::{self, Read, Write};
 
-pub use decoder::{DecodeResult, decode_key_events, drain_key_events, flush_pending_escape};
+pub use decoder::{
+    DecodeResult, InputEvent, decode_key_events, drain_input_events, drain_key_events,
+    flush_pending_escape,
+};
 pub use key_event::{Key, KeyEvent, Modifiers};
 pub use raw_terminal::RawModeGuard;
 
@@ -88,6 +91,31 @@ impl Drop for KeyboardProtocolGuard {
         let _ = stdout.write_all(b"\x1b[<u");
         let _ = stdout.flush();
         raw_terminal::set_keyboard_protocol_pushed(false);
+    }
+}
+
+/// Enables bracketed paste for its lifetime and disables it on drop.
+///
+/// This makes terminal paste arrive as `CSI 200~ ... CSI 201~`, letting the
+/// decoder bypass key resolution for pasted content. Unsupported terminals
+/// ignore these DECSET/DECRST sequences.
+pub struct BracketedPasteGuard;
+
+impl BracketedPasteGuard {
+    pub fn enable(stdout: &mut impl Write) -> io::Result<Self> {
+        stdout.write_all(b"\x1b[?2004h")?;
+        stdout.flush()?;
+        raw_terminal::set_bracketed_paste_active(true);
+        Ok(Self)
+    }
+}
+
+impl Drop for BracketedPasteGuard {
+    fn drop(&mut self) {
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(b"\x1b[?2004l");
+        let _ = stdout.flush();
+        raw_terminal::set_bracketed_paste_active(false);
     }
 }
 

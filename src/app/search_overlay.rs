@@ -99,6 +99,16 @@ impl SearchOverlay {
         self.refresh_from_cursor(editor);
     }
 
+    pub fn paste_text(&mut self, text: &str, editor: &mut EditorCore) {
+        match self.focus {
+            SearchFocus::Search => {
+                self.query.push_str(text);
+                self.refresh_from_cursor(editor);
+            }
+            SearchFocus::Replace => self.replace_text.push_str(text),
+        }
+    }
+
     pub fn handle_key(&mut self, event: &KeyEvent, editor: &mut EditorCore) -> bool {
         match &event.key {
             Key::Esc if event.modifiers == Modifiers::none() => {

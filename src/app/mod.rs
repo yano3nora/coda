@@ -1,5 +1,6 @@
 //! Application-level CLI routing and event-loop ownership.
 
+mod clipboard;
 mod config;
 mod default_bindings;
 mod editor_view;
