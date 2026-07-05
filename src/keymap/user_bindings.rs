@@ -49,6 +49,14 @@ pub enum BindingIssueReason {
 /// Unknown fields are ignored for VS Code compatibility. Invalid entries are
 /// skipped, but valid siblings keep their original definition order.
 pub fn load_user_bindings(text: &str) -> Result<UserBindingsLoad, UserBindingsError> {
+    load_bindings_with_source(text, Source::User)
+}
+
+/// Loads bindings from JSONC text and stamps every valid binding with `source`.
+pub fn load_bindings_with_source(
+    text: &str,
+    source: Source,
+) -> Result<UserBindingsLoad, UserBindingsError> {
     let stripped = strip_jsonc_comments(text);
     let value: Value = serde_json::from_str(&stripped)
         .map_err(|error| UserBindingsError::InvalidJson(error.to_string()))?;
@@ -116,7 +124,7 @@ pub fn load_user_bindings(text: &str) -> Result<UserBindingsLoad, UserBindingsEr
         };
 
         debug_assert_eq!(issues.len(), before_issue_count);
-        bindings.push(Binding::new(parsed_keys, action, when, Source::User));
+        bindings.push(Binding::new(parsed_keys, action, when, source));
     }
 
     Ok(UserBindingsLoad { bindings, issues })
@@ -135,7 +143,7 @@ fn string_field<'a>(entry: &'a Value, name: &str) -> Option<&'a str> {
 }
 
 /// Removes JSONC comments while preserving string literals and whitespace shape.
-fn strip_jsonc_comments(text: &str) -> String {
+pub(crate) fn strip_jsonc_comments(text: &str) -> String {
     #[derive(Clone, Copy)]
     enum State {
         Normal,

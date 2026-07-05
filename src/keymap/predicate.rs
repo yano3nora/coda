@@ -80,6 +80,21 @@ impl FromStr for ContextPredicate {
     }
 }
 
+impl fmt::Display for ContextPredicate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, term) in self.terms.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(" && ")?;
+            }
+            if term.negated {
+                formatter.write_str("!")?;
+            }
+            formatter.write_str(&term.name)?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for ParsePredicateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

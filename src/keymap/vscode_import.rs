@@ -1,0 +1,371 @@
+//! VS Code `keybindings.json` importer (SPEC-0004).
+
+use serde_json::Value;
+
+use crate::input::{Key, KeyEvent};
+
+use super::{
+    Binding, ContextPredicate, EditorAction, ImportReport, ReportEntry, Source,
+    action_for_vscode_command, parse_key_sequence, user_bindings::strip_jsonc_comments,
+    vscode_when::convert_vscode_when,
+};
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct VsCodeImport {
+    pub bindings: Vec<Binding>,
+    pub report: ImportReport,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum VsCodeImportError {
+    InvalidJson(String),
+    RootNotArray,
+}
+
+pub fn import_vscode_keybindings(text: &str) -> Result<VsCodeImport, VsCodeImportError> {
+    let stripped = strip_jsonc_comments(text);
+    let value: Value = serde_json::from_str(&stripped)
+        .map_err(|error| VsCodeImportError::InvalidJson(error.to_string()))?;
+    let entries = value.as_array().ok_or(VsCodeImportError::RootNotArray)?;
+
+    let mut bindings = Vec::new();
+    let mut report = ImportReport::default();
+
+    for entry in entries {
+        classify_entry(entry, &mut bindings, &mut report);
+    }
+
+    debug_assert_eq!(entries.len(), report.total_classified());
+    Ok(VsCodeImport { bindings, report })
+}
+
+pub fn render_generated_bindings(bindings: &[Binding]) -> String {
+    let values = bindings
+        .iter()
+        .map(|binding| {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "key".to_string(),
+                Value::String(format_key_for_config(&binding.keys)),
+            );
+            object.insert(
+                "command".to_string(),
+                Value::String(binding.action.as_str().to_string()),
+            );
+            if let Some(when) = &binding.when {
+                object.insert("when".to_string(), Value::String(when.to_string()));
+            }
+            Value::Object(object)
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&values).expect("generated bindings are serializable") + "\n"
+}
+
+pub fn format_key_for_config(keys: &[KeyEvent]) -> String {
+    keys.iter()
+        .map(format_chord_for_config)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn classify_entry(entry: &Value, bindings: &mut Vec<Binding>, report: &mut ImportReport) {
+    let key = string_field(entry, "key").map(ToOwned::to_owned);
+    let command = string_field(entry, "command").map(ToOwned::to_owned);
+    let when = string_field(entry, "when").map(ToOwned::to_owned);
+
+    let Some(command_text) = command.as_deref() else {
+        report
+            .unsupported_commands
+            .push(ReportEntry::new(key, command, when, "missing command"));
+        return;
+    };
+
+    if command_text.starts_with('-') {
+        report.unsupported_commands.push(ReportEntry::new(
+            key,
+            command,
+            when,
+            "negative binding is not supported in MVP",
+        ));
+        return;
+    }
+
+    let Some(action) = action_for_vscode_command(command_text) else {
+        if is_ignored_command(command_text) {
+            report
+                .ignored
+                .push(ReportEntry::new(key, command, when, "outside editor scope"));
+        } else {
+            report.unsupported_commands.push(ReportEntry::new(
+                key,
+                command,
+                when,
+                "feature not implemented",
+            ));
+        }
+        return;
+    };
+
+    let Some(key_text) = key.as_deref() else {
+        report
+            .invalid_keys
+            .push(ReportEntry::new(key, command, when, "missing key"));
+        return;
+    };
+    let parsed_keys = match parse_key_sequence(key_text) {
+        Ok(keys) => keys,
+        Err(error) => {
+            report
+                .invalid_keys
+                .push(ReportEntry::new(key, command, when, error.to_string()));
+            return;
+        }
+    };
+
+    let parsed_when = match when.as_deref() {
+        Some(when_text) => match convert_vscode_when(when_text).and_then(|converted| {
+            converted
+                .parse::<ContextPredicate>()
+                .map_err(|e| e.to_string().into())
+        }) {
+            Ok(predicate) => Some(predicate),
+            Err(error) => {
+                report.unsupported_conditions.push(ReportEntry::new(
+                    key,
+                    command,
+                    when,
+                    error.to_string(),
+                ));
+                return;
+            }
+        },
+        None => None,
+    };
+
+    if let Some(existing_index) = bindings
+        .iter()
+        .position(|binding| binding.keys == parsed_keys && binding.when == parsed_when)
+    {
+        let previous = bindings.remove(existing_index);
+        remove_imported_report_entry(report, &previous);
+        report.conflicts.push(ReportEntry::new(
+            Some(format_key_for_config(&previous.keys)),
+            Some(previous.action.as_str().to_string()),
+            previous.when.as_ref().map(ToString::to_string),
+            "overwritten by later VS Code binding",
+        ));
+    }
+
+    let binding = Binding::new(parsed_keys, action, parsed_when, Source::Imported);
+    report.imported.push(ReportEntry::new(
+        Some(format_key_for_config(&binding.keys)),
+        Some(action.as_str().to_string()),
+        binding.when.as_ref().map(ToString::to_string),
+        imported_reason(action),
+    ));
+    bindings.push(binding);
+}
+
+fn remove_imported_report_entry(report: &mut ImportReport, previous: &Binding) {
+    if let Some(index) = report.imported.iter().position(|entry| {
+        entry.key.as_deref() == Some(format_key_for_config(&previous.keys).as_str())
+            && entry.command.as_deref() == Some(previous.action.as_str())
+            && entry.when == previous.when.as_ref().map(ToString::to_string)
+    }) {
+        report.imported.remove(index);
+    }
+}
+
+fn imported_reason(_action: EditorAction) -> &'static str {
+    // TODO(SPEC-0004): mark suggest/quick-open predicates as inactive once the
+    // report entry carries enough context to distinguish those imports.
+    "imported"
+}
+
+fn is_ignored_command(command: &str) -> bool {
+    if command.starts_with("editor.") || command.starts_with("cursor") {
+        return false;
+    }
+    command.starts_with("workbench.")
+        || command.starts_with("extension.")
+        || command.split_once('.').is_some()
+}
+
+fn string_field<'a>(entry: &'a Value, name: &str) -> Option<&'a str> {
+    entry.as_object()?.get(name)?.as_str()
+}
+
+fn format_chord_for_config(key: &KeyEvent) -> String {
+    let mut parts = Vec::new();
+    if key.modifiers.contains_ctrl() {
+        parts.push("ctrl".to_string());
+    }
+    if key.modifiers.contains_alt() {
+        parts.push("alt".to_string());
+    }
+    if key.modifiers.contains_shift() {
+        parts.push("shift".to_string());
+    }
+    if key.modifiers.contains_super() {
+        parts.push("cmd".to_string());
+    }
+    parts.push(format_key_name(&key.key));
+    parts.join("+")
+}
+
+fn format_key_name(key: &Key) -> String {
+    match key {
+        Key::Char(' ') => "space".to_string(),
+        Key::Char(character) => character.to_ascii_lowercase().to_string(),
+        Key::Enter => "enter".to_string(),
+        Key::Esc => "escape".to_string(),
+        Key::Tab => "tab".to_string(),
+        Key::Backspace => "backspace".to_string(),
+        Key::Up => "up".to_string(),
+        Key::Down => "down".to_string(),
+        Key::Left => "left".to_string(),
+        Key::Right => "right".to_string(),
+        Key::Home => "home".to_string(),
+        Key::End => "end".to_string(),
+        Key::PageUp => "pageup".to_string(),
+        Key::PageDown => "pagedown".to_string(),
+        Key::Delete => "delete".to_string(),
+        Key::F(number) => format!("f{number}"),
+        Key::Unknown(bytes) => format!("unknown({})", crate::input::escape_bytes(bytes)),
+    }
+}
+
+impl From<String> for super::vscode_when::UnsupportedCondition {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_key_for_config, import_vscode_keybindings};
+    use crate::keymap::{EditorAction, Source, parse_key_sequence};
+
+    #[test]
+    fn imports_and_classifies_every_fixture_entry() {
+        let fixture = r#"[
+            { "key": "ctrl+j", "command": "cursorDown", "when": "editorFocus" },
+            { "key": "ctrl+shift+j", "command": "cursorDownSelect", "when": "editorFocus" },
+            { "key": "cmd+t", "command": "workbench.action.terminal.new" },
+            { "key": "cmd+e", "command": "extension.foo" },
+            { "key": "cmd+p", "command": "projectManager.list" },
+            { "key": "f2", "command": "editor.action.rename" },
+            { "key": "ctrl+j", "command": "-cursorDown" },
+            { "key": "ctrl+m", "command": "cursorDown", "when": "resourceLangId == markdown" },
+            { "key": "ctrl+t", "command": "cursorDown", "when": "editorTextFocus && !editorReadonly" },
+            { "key": "ctrl+[IntlBackslash]", "command": "cursorDown" },
+            { "key": "ctrl+x", "command": "cursorDown", "when": "editorFocus" },
+            { "key": "ctrl+x", "command": "cursorUp", "when": "editorFocus" }
+        ]"#;
+
+        let imported = import_vscode_keybindings(fixture).unwrap();
+        let summary = imported.report.summary();
+
+        assert_eq!(summary.imported, 4);
+        assert_eq!(summary.ignored, 3);
+        assert_eq!(summary.unsupported_commands, 2);
+        assert_eq!(summary.unsupported_conditions, 1);
+        assert_eq!(summary.invalid_keys, 1);
+        assert_eq!(summary.conflicts, 1);
+        assert_eq!(summary.disabled_by_terminal_capability, 0);
+        assert_eq!(imported.report.total_classified(), 12);
+
+        assert!(imported.bindings.iter().any(|binding| {
+            binding.action == EditorAction::CursorDown
+                && binding.source == Source::Imported
+                && binding
+                    .when
+                    .as_ref()
+                    .is_some_and(|when| when.to_string() == "editorFocus")
+        }));
+        assert!(imported.bindings.iter().any(|binding| {
+            binding.action == EditorAction::SelectionDown
+                && binding
+                    .when
+                    .as_ref()
+                    .is_some_and(|when| when.to_string() == "editorFocus")
+        }));
+        assert!(imported.bindings.iter().any(|binding| {
+            binding.action == EditorAction::CursorDown
+                && binding
+                    .when
+                    .as_ref()
+                    .is_some_and(|when| when.to_string() == "textInputFocus && !isReadonly")
+        }));
+        assert!(imported.bindings.iter().any(|binding| {
+            binding.action == EditorAction::CursorUp
+                && format_key_for_config(&binding.keys) == "ctrl+x"
+        }));
+        assert!(!imported.bindings.iter().any(|binding| {
+            binding.action == EditorAction::CursorDown
+                && format_key_for_config(&binding.keys) == "ctrl+x"
+        }));
+
+        assert_eq!(imported.report.ignored[0].reason, "outside editor scope");
+        assert_eq!(
+            imported.report.unsupported_commands[0].reason,
+            "feature not implemented"
+        );
+        assert_eq!(
+            imported.report.unsupported_commands[1].reason,
+            "negative binding is not supported in MVP"
+        );
+        assert!(
+            imported.report.unsupported_conditions[0]
+                .reason
+                .contains("unsupported VS Code when syntax")
+        );
+    }
+
+    #[test]
+    fn report_render_contains_counts_and_examples() {
+        let imported = import_vscode_keybindings(
+            r#"[
+                { "key": "ctrl+j", "command": "cursorDown", "when": "editorFocus" },
+                { "key": "cmd+t", "command": "workbench.action.terminal.new" },
+                { "key": "f2", "command": "editor.action.rename" },
+                { "key": "ctrl+m", "command": "cursorDown", "when": "resourceLangId == markdown" },
+                { "key": "ctrl+[IntlBackslash]", "command": "cursorDown" }
+            ]"#,
+        )
+        .unwrap();
+
+        let report = imported.report.render_text();
+        for expected in [
+            "VS Code keybinding import completed.",
+            "Imported: 1",
+            "Ignored: 1",
+            "Unsupported commands: 1",
+            "Unsupported conditions: 1",
+            "Invalid keys: 1",
+            "Conflicts: 0",
+            "Disabled by terminal capability: 0",
+            "Examples:",
+            "- Imported ctrl+j -> cursor.down [editorFocus] [imported]",
+            "- Ignored cmd+t -> workbench.action.terminal.new [outside editor scope]",
+            "- Unsupported command f2 -> editor.action.rename [feature not implemented]",
+            "- Unsupported condition ctrl+m -> cursorDown [resourceLangId == markdown]",
+            "- Invalid key ctrl+[IntlBackslash] -> cursorDown",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing `{expected}` in\n{report}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_key_for_config_round_trips_through_parser() {
+        for input in ["ctrl+shift+j", "cmd+s", "ctrl+k ctrl+s", "f1", "ctrl+space"] {
+            let parsed = parse_key_sequence(input).unwrap();
+            let formatted = format_key_for_config(&parsed);
+            assert_eq!(parse_key_sequence(&formatted), Ok(parsed), "{input}");
+            assert_eq!(formatted, input);
+        }
+    }
+}
