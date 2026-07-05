@@ -8,9 +8,17 @@
 macOS の VS Code 筋肉記憶は Cmd 中心であり、Cmd が terminal に届くかどうかは製品価値に直結する。Ghostty 1.3.1 での実測(2026-07-05)で以下が判明した。
 
 - `Cmd+S` は kitty keyboard protocol の super modifier として届く(CSI u, modifier bit 8)
-- `Cmd+Shift+P` は届かない(Ghostty 自身の command palette が同キーを消費していることを確認)
+- `Cmd+Shift+P` は届かない(Ghostty 自身の command palette `toggle_command_palette` が消費)
+- `Cmd+Shift+J` も届かない(Ghostty の `write_screen_file:paste` が消費し、一時ファイルのパスが貼り付けられる)
 - `Ctrl+Shift+J` は正しく区別されて届く
 - `Shift+<文字>` は修飾情報が文字に畳み込まれて届く(protocol の仕様どおり。損失ではない)
+
+`ghostty +list-keybinds` で予約キー一覧を照会した結果、**Ghostty は binding されていない super combo を透過し、binding 済みのものだけを消費する**(per-key 予約であり、Cmd+Shift 帯全体の問題ではない)と確定した。default 予約には VS Code 筋肉記憶の主要キーが含まれる点に注意:
+
+- `super+c` / `super+v`(copy / paste — 意味的には整合するが editor には届かない)
+- `super+z` / `super+shift+z`(undo / redo)
+- `super+a`(select all)
+- `super+k`(clear screen)、`super+q`(quit)、`super+1..9`(tab 切替)
 
 ここから得られた設計上の重要な事実:
 
@@ -34,7 +42,7 @@ normalized key event は ctrl / alt / shift / super を保持する(実装済み
 | (b) 知識 | 既知 terminal の quirk 情報(`TERM_PROGRAM` ベース) | 予約キーの警告(例: Ghostty の `Cmd+Shift+P`) |
 | (c) 実測 | `keymap verify`(対話的検証) | **個々の chord が実際に届くか(真実はここ)** |
 
-- (b) は警告のみに使い、小さく保つ(quirk DB の網羅を目指さない)
+- (b) は警告のみに使い、小さく保つ(quirk DB の網羅を目指さない)。ただし Ghostty は `ghostty +list-keybinds` で**ユーザーの実設定を含む予約キー一覧を CLI 照会できる**ため、静的 DB ではなく実行時照会で正確な quirk 情報を得られる(照会可能な terminal はこの方式を優先する)
 - (c) は import した binding の chord を利用者に実際に押してもらい、届いたかを記録する。inspect-key の仕組みを binding 検証に転用する
 
 ### 3. Import に cmd 戦略オプションを設ける
@@ -83,9 +91,10 @@ SPEC-0003(deliverability の非可査性)、SPEC-0004(--cmd オプション、re
 
 ## Open Questions
 
-- Ghostty で `Cmd+Shift+P` 以外の Cmd+Shift 組み合わせが届くか(予約キー個別問題か、Cmd+Shift 全般問題か)— 実測待ち
+- ~~Ghostty で Cmd+Shift 全般が届かないのか、予約キー個別問題か~~ → 解決(2026-07-05): per-key 予約。未 binding の super combo は透過される
 - verify 結果の保存形式・場所(`~/.config/<app>/` 配下)と、terminal が変わったときの無効化条件(`TERM_PROGRAM` + version をキーにする等)
 - verify を import フローに組み込むか(import 直後に「5 個の binding が未検証です。今すぐ verify しますか」)
+- `super+c/v/z/a` 等、Ghostty default に消費される主要キーの案内方針: Ghostty 側の keybind 解除を案内するか、これらに限り `--cmd=ctrl` 的な部分変換を提案するか
 
 ## Progress
 
