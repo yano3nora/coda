@@ -53,7 +53,9 @@ ADR-0001 の Non-goals に加え、MVP では以下を実装しない。
 
 - character / word / line start / line end / page 単位の cursor movement
 - selection movement、basic multi-line selection、select all
-- copy / cut / paste(OS clipboard と terminal clipboard の双方に対応可能な範囲で)
+- copy / cut / paste
+    - paste は terminal の bracketed paste を第一とする(`Cmd+V` 等は terminal に委譲。ADR-0008)
+    - copy / cut は OSC 52 で OS clipboard へ書き込み、拒否時は内部 clipboard に fallback して明示する
 - undo / redo
 - insert line before / after
 - delete character / word / line
@@ -90,6 +92,11 @@ ADR-0001 の Non-goals に加え、MVP では以下を実装しない。
 
 - vertical / horizontal split、pane focus next / previous、pane close、pane maximize toggle
 - split より先に keymap import / editor interaction を完成させる
+
+### Mouse Support(MVP 後半または v0.2。ADR-0008)
+
+- click = カーソル移動、drag = selection、wheel = スクロール(SGR mouse protocol)
+- Shift+ドラッグは terminal ネイティブ選択として素通しする(terminal のマウス選択コピーと共存)
 
 ## Invariants
 
@@ -153,4 +160,4 @@ CLI は SPEC-0005、設定ファイルは ADR-0005 / SPEC-0005 を参照。
 
 - large file protection の閾値(サイズ / 行数)と挙動(警告 / read-only / 拒否)
 - clipboard 統合の優先順位(OSC 52 / OS clipboard コマンド / 内部 clipboard の fallback 順)
-- Deferred(MVP 完了後に判断): split view 正式サポート、tree-sitter(highlighting engine の差し替え候補として)、ユーザー theme 追加、mouse support、persistent session、recent files、fuzzy file open、line numbers / minimap 相当、read-only mode、diff mode、他 editor profile import(Zed / Sublime / JetBrains / Helix)、remote clipboard、SSH 向け bootstrap、configuration UI、keybinding conflict UI
+- Deferred(MVP 完了後に判断): split view 正式サポート、tree-sitter(highlighting engine の差し替え候補として)、ユーザー theme 追加、persistent session、recent files、fuzzy file open、line numbers / minimap 相当、read-only mode、diff mode、他 editor profile import(Zed / Sublime / JetBrains / Helix)、remote clipboard、SSH 向け bootstrap、configuration UI、keybinding conflict UI

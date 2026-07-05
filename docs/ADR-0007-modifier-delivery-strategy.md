@@ -94,7 +94,7 @@ SPEC-0003(deliverability の非可査性)、SPEC-0004(--cmd オプション、re
 - ~~Ghostty で Cmd+Shift 全般が届かないのか、予約キー個別問題か~~ → 解決(2026-07-05): per-key 予約。未 binding の super combo は透過される
 - verify 結果の保存形式・場所(`~/.config/<app>/` 配下)と、terminal が変わったときの無効化条件(`TERM_PROGRAM` + version をキーにする等)
 - verify を import フローに組み込むか(import 直後に「5 個の binding が未検証です。今すぐ verify しますか」)
-- `super+c/v/z/a` 等、Ghostty default に消費される主要キーの案内方針: Ghostty 側の keybind 解除を案内するか、これらに限り `--cmd=ctrl` 的な部分変換を提案するか
+- ~~`super+c/v/z/a` 等の案内方針~~ → 一部解決(ADR-0008): paste とマウス選択 copy は terminal に委譲するため配達不要。editor 内部が必須な select all / undo / キーボード選択 copy のみ、代替キー変換または terminal 側 keybind 解除を report で案内する
 
 ## Progress
 
