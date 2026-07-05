@@ -15,9 +15,9 @@
 
 ## todo
 
-- [ ] 依存追加: `unicode-segmentation`、`unicode-width`(ADR-0009)
-- [ ] `src/core/position.rs`: `Position { line: usize, grapheme: usize }` を定義する(Ord 実装含む。selection 範囲の正規化に使う)
-- [ ] `src/core/buffer.rs`: `TextBuffer` を実装する
+- [x] 依存追加: `unicode-segmentation`、`unicode-width`(ADR-0009)
+- [x] `src/core/position.rs`: `Position { line: usize, grapheme: usize }` を定義する(Ord 実装含む。selection 範囲の正規化に使う)
+- [x] `src/core/buffer.rs`: `TextBuffer` を実装する
     - fields: `lines: Vec<String>`(EOL を含まない)、`line_ending: LineEnding { Lf, CrLf }`、`trailing_newline: bool`
     - `from_bytes(&[u8]) -> Result<(TextBuffer, LoadInfo), LoadError>`
         - UTF-8 不正は `LoadError::InvalidUtf8` で拒否する(lossy 変換しない。ADR-0009)
@@ -30,39 +30,41 @@
         - `delete_range(start: Position, end: Position) -> String`(削除したテキストを返す。undo の逆操作用)
         - `line(&self, index) -> Option<&str>` / `line_count()` / `grapheme_count(line_index) -> usize`
     - position の正規化: 行末超過の grapheme index は行末に clamp する helper を提供する
-- [ ] `src/core/mod.rs` で `buffer` / `position` を公開する
-- [ ] table-driven unit test(AGENTS.md Testing 方針)
+- [x] `src/core/mod.rs` で `buffer` / `position` を公開する
+- [x] table-driven unit test(AGENTS.md Testing 方針)
 
 ## testcases
 
 round-trip(`from_bytes` → `to_bytes` が入力と一致すること):
 
-- [ ] LF・末尾改行あり
-- [ ] LF・末尾改行なし
-- [ ] CRLF・末尾改行あり
-- [ ] 空ファイル(0 bytes)
-- [ ] 日本語・絵文字(👨‍👩‍👧‍👦 等の ZWJ sequence)・結合文字を含むファイル
+- [x] LF・末尾改行あり
+- [x] LF・末尾改行なし
+- [x] CRLF・末尾改行あり
+- [x] 空ファイル(0 bytes)
+- [x] 日本語・絵文字(👨‍👩‍👧‍👦 等の ZWJ sequence)・結合文字を含むファイル
 
 load:
 
-- [ ] CRLF 多数 + LF 少数の混在 → `line_ending = CrLf` かつ `mixed_line_endings = true`
-- [ ] 不正 UTF-8 bytes → `LoadError::InvalidUtf8`(panic しない)
+- [x] CRLF 多数 + LF 少数の混在 → `line_ending = CrLf` かつ `mixed_line_endings = true`
+- [x] 不正 UTF-8 bytes → `LoadError::InvalidUtf8`(panic しない)
 
 編集:
 
-- [ ] ASCII 行への `insert` / `delete_range` が期待通り動く
-- [ ] `"あa👍"` の grapheme index 1 への挿入が「あ」と「a」の間に入る(byte 境界でなく grapheme 境界)
-- [ ] ZWJ 絵文字(👨‍👩‍👧‍👦)を 1 grapheme として `delete_range` で丸ごと消せる
-- [ ] 改行を含む text の `insert` で行が分割される
-- [ ] 複数行にまたがる `delete_range` で行が結合され、削除テキストが改行込みで返る
-- [ ] `delete_range` の返り値を同じ位置に `insert` すると元に戻る(undo の前提となる往復性)
-- [ ] 行末超過 position の clamp が働く
+- [x] ASCII 行への `insert` / `delete_range` が期待通り動く
+- [x] `"あa👍"` の grapheme index 1 への挿入が「あ」と「a」の間に入る(byte 境界でなく grapheme 境界)
+- [x] ZWJ 絵文字(👨‍👩‍👧‍👦)を 1 grapheme として `delete_range` で丸ごと消せる
+- [x] 改行を含む text の `insert` で行が分割される
+- [x] 複数行にまたがる `delete_range` で行が結合され、削除テキストが改行込みで返る
+- [x] `delete_range` の返り値を同じ位置に `insert` すると元に戻る(undo の前提となる往復性)
+- [x] 行末超過 position の clamp が働く
 
 品質:
 
-- [ ] `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` がすべて通る
+- [x] `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` がすべて通る
 
 ## notes
+
+- レビューでの修正 1 件: codex sandbox が crates.io に接続できず、unicode-segmentation / unicode-width の**不完全な自作 shim** を vendor/ に置いて通していた。Unicode 処理の偽物実装は grapheme 境界バグの温床になるため、本物の crates.io 依存 (unicode-segmentation 1.13.3 / unicode-width 0.2.2) に差し替えて vendor/ を削除。全 15 テストは本物の crate で通過を確認済み
 
 - undo スタック・cursor 移動(word 単位等)・selection は次タスク(TASK-260705-04 予定)。本タスクは buffer 本体と往復保証まで
 - ファイルの read/write(std::fs)は本タスクでは扱わない。`from_bytes` / `to_bytes` の pure なレイヤーまで(fs 統合は app 層のタスクで行う)
