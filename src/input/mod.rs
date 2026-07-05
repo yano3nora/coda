@@ -1,13 +1,17 @@
 //! Terminal input handling.
 //!
 //! This module is the only place in the current scaffold that talks to terminal
-//! APIs directly. Later tasks should convert raw bytes into normalized key
-//! events before keymap resolution sees them.
+//! APIs directly. Raw bytes are decoded into normalized key events before any
+//! future keymap resolver sees them.
 
+mod decoder;
+mod key_event;
 mod raw_terminal;
 
 use std::io::{self, Read, Write};
 
+pub use decoder::{DecodeResult, decode_key_events};
+pub use key_event::{Key, KeyEvent, Modifiers};
 pub use raw_terminal::RawModeGuard;
 
 const EXIT_CTRL_C: u8 = 0x03;
@@ -39,7 +43,9 @@ pub fn inspect_key() -> io::Result<()> {
         }
 
         let chunk = &buffer[..read];
-        write_raw_line(&mut stdout, &format_chunk(chunk))?;
+        for line in format_inspect_chunk(chunk) {
+            write_raw_line(&mut stdout, &line)?;
+        }
 
         if chunk.contains(&EXIT_CTRL_C) || chunk.contains(&EXIT_CTRL_D) {
             write_raw_line(&mut stdout, "exit")?;
@@ -56,14 +62,38 @@ fn write_raw_line(stdout: &mut impl Write, line: &str) -> io::Result<()> {
     stdout.flush()
 }
 
-fn format_chunk(chunk: &[u8]) -> String {
-    let hex = chunk
+fn format_inspect_chunk(chunk: &[u8]) -> Vec<String> {
+    let mut lines = vec![format!("Raw bytes: {}", escape_bytes(chunk))];
+    match decode_key_events(chunk) {
+        DecodeResult::Complete(events) => {
+            let pressed = events
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("Pressed:   {pressed}"));
+        }
+        DecodeResult::Incomplete => lines.push("Pressed:   <incomplete sequence>".to_string()),
+    }
+    lines.push(format!("Hex:       {}", hex_bytes(chunk)));
+    lines
+}
+
+fn hex_bytes(chunk: &[u8]) -> String {
+    chunk
         .iter()
         .map(|byte| format!("0x{byte:02x}"))
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+}
 
-    format!("Raw bytes: {hex} | Escaped: {}", escape_bytes(chunk))
+#[cfg(test)]
+fn format_chunk(chunk: &[u8]) -> String {
+    format!(
+        "Raw bytes: {} | Hex: {}",
+        escape_bytes(chunk),
+        hex_bytes(chunk)
+    )
 }
 
 fn escape_bytes(bytes: &[u8]) -> String {
@@ -83,7 +113,7 @@ fn escape_bytes(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_bytes, format_chunk};
+    use super::{escape_bytes, format_chunk, format_inspect_chunk};
 
     #[test]
     fn escape_printable_ascii_without_hex_noise() {
@@ -101,10 +131,22 @@ mod tests {
     }
 
     #[test]
-    fn format_chunk_contains_hex_and_escaped_forms() {
+    fn format_chunk_contains_escaped_and_hex_forms() {
         assert_eq!(
             format_chunk(&[0x1b, b'[', b'1', b'0', b'6', b';', b'6', b'u']),
-            r"Raw bytes: 0x1b 0x5b 0x31 0x30 0x36 0x3b 0x36 0x75 | Escaped: \x1b[106;6u"
+            r"Raw bytes: \x1b[106;6u | Hex: 0x1b 0x5b 0x31 0x30 0x36 0x3b 0x36 0x75"
+        );
+    }
+
+    #[test]
+    fn format_inspect_chunk_adds_decoded_pressed_line() {
+        assert_eq!(
+            format_inspect_chunk(&[0x1b, b'[', b'1', b'0', b'6', b';', b'6', b'u']),
+            vec![
+                r"Raw bytes: \x1b[106;6u".to_string(),
+                "Pressed:   Ctrl+Shift+J".to_string(),
+                "Hex:       0x1b 0x5b 0x31 0x30 0x36 0x3b 0x36 0x75".to_string(),
+            ]
         );
     }
 }
