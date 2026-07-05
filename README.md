@@ -18,6 +18,24 @@ coda
 - clipboard: OSC 52 書込(SSH 先から手元の OS clipboard へ)+ bracketed paste
 - raw input inspector(`coda inspect-key`)で terminal の入力問題を自己診断
 
+## Installation
+
+現状は**ソースからのビルドのみ**(配布形態は未定。[backlog](docs/TASK-260706-99-backlog.md) 参照)。
+
+```sh
+# 要 Rust toolchain (rustup または mise install)
+cargo install --path .        # ~/.cargo/bin/coda に入る
+
+# または手動配置
+cargo build --release         # target/release/coda を PATH の通った場所へ
+```
+
+SSH 先で使う場合は、同一 OS / arch のホストへ release binary をコピーすればよい(単体 binary。ただし Linux は glibc 動的リンクのため、極端に古い distro では要再ビルド)。
+
+```sh
+scp target/release/coda remote:~/bin/
+```
+
 ## Usage
 
 ```sh
@@ -62,6 +80,12 @@ mise run pre-commit   # fmt --check / clippy -D warnings / test
 - 設計ドキュメント: `docs/ADR-*.md`(意思決定)、`docs/SPEC-*.md`(仕様)、`docs/TASK-*.md`(開発ログ)
 - 開発規約: [AGENTS.md](AGENTS.md)(依存境界・Testing 方針・scope 制御)
 - 入口になる doc: [ADR-0001 製品方針](docs/ADR-0001-keymap-first-tui-editor.md) / [SPEC-0001 MVP スコープ](docs/SPEC-0001-mvp-scope.md) / [SPEC-0002 keybinding システム](docs/SPEC-0002-keybinding-system.md)
+
+## Deployment / Distribution
+
+- **未整備**(意図的)。crates.io publish・homebrew・GitHub Releases の選定はリリース前タスク([backlog](docs/TASK-260706-99-backlog.md) の「リリース前に必ず」)
+- 前提として製品名の再検討(`coda` の名称衝突)と CI 整備が先
+- `git push` / publish 等の外部公開操作は人間が判断・実行する([AGENTS.md](AGENTS.md) の規約)
 
 ## Status
 
