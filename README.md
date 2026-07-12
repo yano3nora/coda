@@ -117,8 +117,15 @@ keybind = super+a=unbind
 keybind = super+c=performable:copy_to_clipboard   # pass through to coda only when there is no terminal selection
 ```
 
+coda tells you the exact fix instead of leaving you to guess between `unbind` and `text:`. Use `coda inspect-key` to see the raw bytes for any keypress; when a chord is being intercepted, both `coda keymap verify` and the in-editor inspector (`F1` → `inspector.open`) print a ready-to-paste Ghostty config line plus the reason it's the right one. For example, `coda keymap verify` reporting that `Cmd+Z` arrived as `Ctrl+Z` prints:
+
+```text
+MISMATCH   cmd+z  arrived as Ctrl+Z  (edit.undo)
+fix: keybind = super+z=unbind
+     once unbound the key falls through and is encoded via the kitty keyboard protocol. Apply, restart Ghostty (reload is not enough), then re-run `coda keymap verify`.
+```
+
 - Tradeoff: the shell (zsh etc.) also loses the `Cmd+←` line-start translation
-- Use `coda inspect-key` to diagnose which keys actually arrive
 - Fuller worked example — undo/redo, `Cmd+↑/↓`, and the `Cmd+H`-vs-Hide special case: [docs/examples/ghostty.md](docs/examples/ghostty.md)
 
 ### Configuration

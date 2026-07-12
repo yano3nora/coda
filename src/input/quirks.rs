@@ -287,9 +287,197 @@ fn unescape_hex_payload(payload: &str) -> Vec<u8> {
     result
 }
 
+/// A machine-generated Ghostty `keybind` config line that fixes a quirk, plus
+/// a one-line rationale (TASK-260713: explainability principle, ADR-0001 /
+/// SPEC-0002 — a warning without a fix is a dead end).
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Suggestion {
+    pub config_line: String,
+    pub reason: String,
+}
+
+/// Shared closing sentence for every suggestion: `reload_config` alone can
+/// leave a stale macOS menu key equivalent behind, so the reason must always
+/// steer the user to a full restart before re-measuring.
+const VERIFY_AGAIN_REMINDER: &str =
+    "Apply, restart Ghostty (reload is not enough), then re-run `coda keymap verify`.";
+
+/// macOS menu shortcuts verified against real Ghostty (2026-07-13,
+/// docs/examples/ghostty.md): even with nothing bound, these chords are
+/// consumed by the OS menu (Hide / Hide Others / Minimize) before Ghostty's
+/// own `unbind`/`ignore` handling ever sees them — `ignore` is consumed in
+/// the AppKit layer even with the `unconsumed:` prefix (ghostty#7339 /
+/// #8181). Extend this table only after verifying a new combo the same way.
+const MACOS_MENU_RESERVED: [(Key, Modifiers); 3] = [
+    (Key::Char('h'), Modifiers::super_key()),
+    (Key::Char('h'), Modifiers::super_key().with_alt()),
+    (Key::Char('m'), Modifiers::super_key()),
+];
+
+/// Derives the Ghostty config line (and why) that resolves a detected quirk,
+/// following the decision rule verified 2026-07-13 (docs/examples/ghostty.md):
+///
+/// 1. macOS menu-reserved trigger → send the kitty-protocol bytes directly
+///    (`unbind`/`ignore` both fail to reach the pty for these).
+/// 2. Otherwise a clipboard-copy action → `performable:copy_to_clipboard`,
+///    which only fires while the terminal has a selection.
+/// 3. Otherwise a non-portable trigger (`quit`, or the `super+q` /
+///    `super+tab` chords themselves regardless of their bound action) → no
+///    suggestion; these are already classified as OS/terminal-reserved on
+///    import.
+/// 4. Otherwise (any other `Consumed` or `Translated` quirk) → `unbind`.
+///
+/// Pure string logic only: no terminal or resolver access, so `input/`'s
+/// dependency boundary (ADR-0004) stays intact.
+pub fn suggest_ghostty_fix(quirk: &TerminalQuirk) -> Option<Suggestion> {
+    let trigger = &quirk.trigger;
+    let trigger_syntax = format_ghostty_trigger(trigger);
+
+    if is_macos_menu_reserved(trigger) {
+        // Every reserved trigger today is a single character key, so this
+        // never actually returns `None` — see `kitty_csi_u_bytes` docs.
+        let bytes = kitty_csi_u_bytes(trigger)?;
+        return Some(Suggestion {
+            config_line: format!("keybind = {trigger_syntax}=text:{bytes}"),
+            reason: format!(
+                "unbind would revive the macOS menu shortcut for {trigger_syntax}; {bytes} \
+                 is the kitty-protocol encoding of the same key (programs that do not speak \
+                 the protocol will see these bytes as garbage). {VERIFY_AGAIN_REMINDER}"
+            ),
+        });
+    }
+
+    if let QuirkEffect::Consumed { action } = &quirk.effect {
+        if action.starts_with("copy_to_clipboard") {
+            return Some(Suggestion {
+                config_line: format!("keybind = {trigger_syntax}=performable:copy_to_clipboard"),
+                reason: format!(
+                    "fires only while the terminal has a selection, and passes through to \
+                     coda otherwise. {VERIFY_AGAIN_REMINDER}"
+                ),
+            });
+        }
+        if action == "quit" {
+            return None;
+        }
+    }
+    if trigger.modifiers == Modifiers::super_key()
+        && matches!(trigger.key, Key::Char('q') | Key::Tab)
+    {
+        // Non-portable regardless of what they are currently bound to — P2
+        // key delivery already classifies super+q / super+tab as reserved on
+        // import (super+tab never even reaches Ghostty: macOS app switcher).
+        return None;
+    }
+
+    Some(Suggestion {
+        config_line: format!("keybind = {trigger_syntax}=unbind"),
+        reason: format!(
+            "once unbound the key falls through and is encoded via the kitty keyboard \
+             protocol. {VERIFY_AGAIN_REMINDER}"
+        ),
+    })
+}
+
+fn is_macos_menu_reserved(trigger: &KeyEvent) -> bool {
+    MACOS_MENU_RESERVED
+        .iter()
+        .any(|(key, modifiers)| trigger.key == *key && trigger.modifiers == *modifiers)
+}
+
+/// Formats a chord in Ghostty's own `keybind` trigger syntax: lowercase,
+/// modifiers in `super+ctrl+alt+shift` order joined by `+`, arrows as
+/// `arrow_up`/`arrow_down`/`arrow_left`/`arrow_right`, other keys as-is. This
+/// is the left-hand-side inverse of `split_trigger`/`map_key_name` above —
+/// see the round-trip test below.
+fn format_ghostty_trigger(event: &KeyEvent) -> String {
+    let mut parts = Vec::new();
+    if event.modifiers.contains_super() {
+        parts.push("super".to_string());
+    }
+    if event.modifiers.contains_ctrl() {
+        parts.push("ctrl".to_string());
+    }
+    if event.modifiers.contains_alt() {
+        parts.push("alt".to_string());
+    }
+    if event.modifiers.contains_shift() {
+        parts.push("shift".to_string());
+    }
+    parts.push(format_ghostty_key_name(&event.key));
+    parts.join("+")
+}
+
+/// Inverse of `map_key_name`/`map_digit_or_single_char` above, restricted to
+/// the key vocabulary those functions actually produce (quirks only ever
+/// originate from Ghostty's own table, so no other `Key` variant reaches
+/// here in practice). `Char('+')` / `Char('=')` would not round-trip as
+/// trigger syntax, but they cannot occur either: `parse_line`'s
+/// `split_once('=')` already fails on Ghostty's `super+=...` / `super++...`
+/// lines, so no quirk is ever built for them.
+fn format_ghostty_key_name(key: &Key) -> String {
+    match key {
+        Key::Left => "arrow_left".to_string(),
+        Key::Right => "arrow_right".to_string(),
+        Key::Up => "arrow_up".to_string(),
+        Key::Down => "arrow_down".to_string(),
+        Key::Home => "home".to_string(),
+        Key::End => "end".to_string(),
+        Key::PageUp => "page_up".to_string(),
+        Key::PageDown => "page_down".to_string(),
+        Key::Enter => "enter".to_string(),
+        Key::Esc => "escape".to_string(),
+        Key::Tab => "tab".to_string(),
+        Key::Backspace => "backspace".to_string(),
+        Key::Char(' ') => "space".to_string(),
+        Key::Char(character) => character.to_string(),
+        // Outside `map_key_name`'s vocabulary; kept total rather than
+        // panicking, per the module's "never crash on odd input" principle.
+        Key::Delete => "delete".to_string(),
+        Key::F(number) => format!("f{number}"),
+        Key::Unknown(_) => "unknown".to_string(),
+    }
+}
+
+/// Encodes a character-key chord as its kitty keyboard protocol CSI-u escape
+/// (`\x1b[<codepoint>;<1 + modifier bitmask>u`, bitmask shift=1 alt=2 ctrl=4
+/// super=8 — the exact inverse of `Modifiers::from_kitty_encoded`). Returns
+/// `None` for non-character keys: the only caller is the verified
+/// menu-reserved table above, which today is `h`/`m` only, so functional-key
+/// (arrow/etc.) legacy-with-modifier encoding is out of scope until a
+/// verified reserved combo actually needs it.
+fn kitty_csi_u_bytes(event: &KeyEvent) -> Option<String> {
+    let Key::Char(character) = event.key else {
+        return None;
+    };
+    let codepoint = character as u32;
+    let modifier_value = 1 + kitty_modifier_bitmask(event.modifiers);
+    Some(format!("\\x1b[{codepoint};{modifier_value}u"))
+}
+
+fn kitty_modifier_bitmask(modifiers: Modifiers) -> u8 {
+    let mut bits = 0;
+    if modifiers.contains_shift() {
+        bits |= 0b0001;
+    }
+    if modifiers.contains_alt() {
+        bits |= 0b0010;
+    }
+    if modifiers.contains_ctrl() {
+        bits |= 0b0100;
+    }
+    if modifiers.contains_super() {
+        bits |= 0b1000;
+    }
+    bits
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{QuirkEffect, TerminalQuirk, parse_ghostty_keybinds};
+    use super::{
+        QuirkEffect, TerminalQuirk, format_ghostty_trigger, kitty_csi_u_bytes, map_key_name,
+        parse_ghostty_keybinds, split_trigger, suggest_ghostty_fix,
+    };
     use crate::input::{Key, KeyEvent, Modifiers};
 
     // Real `ghostty +list-keybinds` output escapes the backslash itself:
@@ -483,5 +671,216 @@ keybind = hyper+left=text:\\x01
             .find(|quirk| quirk.trigger == trigger)
             .unwrap_or_else(|| panic!("no quirk for {trigger:?}"))
             .clone()
+    }
+
+    /// Table-driven per TASK-260713: every branch of the decision rule
+    /// verified 2026-07-13 against real Ghostty (docs/examples/ghostty.md).
+    #[test]
+    fn suggest_ghostty_fix_matches_the_decision_table() {
+        let cases: Vec<(&str, TerminalQuirk, Option<&str>)> = vec![
+            (
+                "plain super consumed bind -> unbind",
+                TerminalQuirk {
+                    trigger: KeyEvent::new(Key::Char('z'), Modifiers::super_key()),
+                    effect: QuirkEffect::Consumed {
+                        action: "undo".to_string(),
+                    },
+                    source_line: "super+z=undo".to_string(),
+                },
+                Some("keybind = super+z=unbind"),
+            ),
+            (
+                "macOS menu-reserved trigger -> kitty text bytes",
+                TerminalQuirk {
+                    trigger: KeyEvent::new(Key::Char('h'), Modifiers::super_key()),
+                    effect: QuirkEffect::Consumed {
+                        action: "ignore".to_string(),
+                    },
+                    source_line: "super+h=ignore".to_string(),
+                },
+                Some("keybind = super+h=text:\\x1b[104;9u"),
+            ),
+            (
+                "clipboard copy action -> performable",
+                TerminalQuirk {
+                    trigger: KeyEvent::new(Key::Char('c'), Modifiers::super_key()),
+                    effect: QuirkEffect::Consumed {
+                        action: "copy_to_clipboard:mixed".to_string(),
+                    },
+                    source_line: "super+c=copy_to_clipboard:mixed".to_string(),
+                },
+                Some("keybind = super+c=performable:copy_to_clipboard"),
+            ),
+            (
+                "quit action -> no suggestion (non-portable)",
+                TerminalQuirk {
+                    trigger: KeyEvent::new(Key::Char('q'), Modifiers::super_key()),
+                    effect: QuirkEffect::Consumed {
+                        action: "quit".to_string(),
+                    },
+                    source_line: "super+q=quit".to_string(),
+                },
+                None,
+            ),
+            (
+                "super+tab trigger -> no suggestion (macOS app switcher)",
+                TerminalQuirk {
+                    trigger: KeyEvent::new(Key::Tab, Modifiers::super_key()),
+                    effect: QuirkEffect::Consumed {
+                        action: "next_tab".to_string(),
+                    },
+                    source_line: "super+tab=next_tab".to_string(),
+                },
+                None,
+            ),
+            (
+                "translated quirk -> unbind",
+                TerminalQuirk {
+                    trigger: KeyEvent::new(Key::Left, Modifiers::super_key()),
+                    effect: QuirkEffect::Translated {
+                        events: vec![KeyEvent::new(Key::Char('a'), Modifiers::ctrl())],
+                        raw: vec![0x01],
+                    },
+                    source_line: "super+arrow_left=text:\\x01".to_string(),
+                },
+                Some("keybind = super+arrow_left=unbind"),
+            ),
+        ];
+
+        for (name, quirk, expected_config_line) in cases {
+            let suggestion = suggest_ghostty_fix(&quirk);
+            match expected_config_line {
+                Some(expected) => {
+                    let suggestion =
+                        suggestion.unwrap_or_else(|| panic!("{name}: expected a suggestion"));
+                    assert_eq!(suggestion.config_line, expected, "{name}");
+                    assert!(
+                        suggestion.reason.contains("restart Ghostty"),
+                        "{name}: reason must mention restarting Ghostty: {}",
+                        suggestion.reason
+                    );
+                    assert!(
+                        suggestion.reason.contains("coda keymap verify"),
+                        "{name}: reason must mention re-verifying: {}",
+                        suggestion.reason
+                    );
+                }
+                None => assert!(suggestion.is_none(), "{name}: expected no suggestion"),
+            }
+        }
+    }
+
+    #[test]
+    fn suggest_ghostty_fix_menu_reserved_reason_explains_why_unbind_is_unsafe() {
+        let quirk = TerminalQuirk {
+            trigger: KeyEvent::new(Key::Char('h'), Modifiers::super_key()),
+            effect: QuirkEffect::Consumed {
+                action: "ignore".to_string(),
+            },
+            source_line: "super+h=ignore".to_string(),
+        };
+
+        let suggestion = suggest_ghostty_fix(&quirk).expect("menu-reserved chord suggests a fix");
+        assert!(
+            suggestion.reason.contains("macOS menu shortcut"),
+            "{}",
+            suggestion.reason
+        );
+        assert!(
+            suggestion.reason.contains("kitty-protocol encoding"),
+            "{}",
+            suggestion.reason
+        );
+        // TASK-260713 notes: the text: approach leaks raw bytes into
+        // programs that never enabled the kitty protocol — the reason must
+        // own that tradeoff instead of hiding it.
+        assert!(
+            suggestion.reason.contains("garbage"),
+            "{}",
+            suggestion.reason
+        );
+    }
+
+    #[test]
+    fn suggest_ghostty_fix_treats_super_q_as_non_portable_regardless_of_action() {
+        // Even if some future Ghostty default rebinds super+q to something
+        // other than `quit`, the trigger itself is OS-reserved.
+        let quirk = TerminalQuirk {
+            trigger: KeyEvent::new(Key::Char('q'), Modifiers::super_key()),
+            effect: QuirkEffect::Consumed {
+                action: "close_surface".to_string(),
+            },
+            source_line: "super+q=close_surface".to_string(),
+        };
+        assert_eq!(suggest_ghostty_fix(&quirk), None);
+    }
+
+    #[test]
+    fn format_ghostty_trigger_matches_ghostty_config_syntax() {
+        assert_eq!(
+            format_ghostty_trigger(&KeyEvent::new(Key::Char('h'), Modifiers::super_key())),
+            "super+h"
+        );
+        assert_eq!(
+            format_ghostty_trigger(&KeyEvent::new(Key::Up, Modifiers::super_key().with_shift())),
+            "super+shift+arrow_up"
+        );
+        assert_eq!(
+            format_ghostty_trigger(&KeyEvent::new(Key::Left, Modifiers::alt())),
+            "alt+arrow_left"
+        );
+    }
+
+    /// Round-trips `format_ghostty_trigger`'s output back through this
+    /// module's own parsers, so the formatter can never silently drift out
+    /// of sync with `split_trigger`/`map_key_name`.
+    #[test]
+    fn format_ghostty_trigger_round_trips_through_split_trigger_and_map_key_name() {
+        let cases = [
+            KeyEvent::new(Key::Char('h'), Modifiers::super_key()),
+            KeyEvent::new(Key::Char('h'), Modifiers::super_key().with_alt()),
+            KeyEvent::new(Key::Char('m'), Modifiers::super_key()),
+            KeyEvent::new(Key::Char('z'), Modifiers::super_key()),
+            KeyEvent::new(Key::Char('z'), Modifiers::super_key().with_shift()),
+            KeyEvent::new(Key::Up, Modifiers::super_key()),
+            KeyEvent::new(Key::Down, Modifiers::super_key().with_shift()),
+            KeyEvent::new(Key::Left, Modifiers::alt()),
+            KeyEvent::new(Key::Char('1'), Modifiers::super_key()),
+        ];
+
+        for event in cases {
+            let trigger_text = format_ghostty_trigger(&event);
+            let (modifiers, key_token) = split_trigger(&trigger_text)
+                .unwrap_or_else(|| panic!("{trigger_text} failed to split"));
+            let key = map_key_name(key_token)
+                .unwrap_or_else(|| panic!("{trigger_text} failed to map back"));
+            assert_eq!(KeyEvent::new(key, modifiers), event, "{trigger_text}");
+        }
+    }
+
+    /// CSI-u modifier bitmask table: 9 = super only (1 + 8), 10 = shift+super
+    /// (1 + 8 + 1), matching the worked examples in
+    /// docs/examples/ghostty.md.
+    #[test]
+    fn kitty_csi_u_bytes_encodes_super_and_shift_super_modifier_values() {
+        assert_eq!(
+            kitty_csi_u_bytes(&KeyEvent::new(Key::Char('h'), Modifiers::super_key())),
+            Some("\\x1b[104;9u".to_string())
+        );
+        assert_eq!(
+            kitty_csi_u_bytes(&KeyEvent::new(
+                Key::Char('z'),
+                Modifiers::super_key().with_shift()
+            )),
+            Some("\\x1b[122;10u".to_string())
+        );
+    }
+
+    #[test]
+    fn kitty_csi_u_bytes_is_none_for_non_character_keys() {
+        assert_eq!(
+            kitty_csi_u_bytes(&KeyEvent::new(Key::Up, Modifiers::super_key())),
+            None
+        );
     }
 }

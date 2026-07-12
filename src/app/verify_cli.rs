@@ -18,6 +18,7 @@ use crate::{
     input::{
         InputEvent, Key, KeyEvent, KeyboardProtocolGuard, Modifiers, RawModeGuard,
         drain_input_events, flush_pending_escape, poll_readable,
+        quirks::{self, TerminalQuirk, suggest_ghostty_fix},
     },
     keymap::{Binding, Source, format_key_for_config},
 };
@@ -160,7 +161,13 @@ impl VerifySession {
 
     /// One line per target plus totals; ends with the `--cmd=ctrl` escape
     /// hatch hint when a super chord did not arrive (ADR-0007 §3).
-    pub(crate) fn summary_lines(&self) -> Vec<String> {
+    ///
+    /// `quirks` is the detected Ghostty keybind table (possibly empty, e.g.
+    /// outside Ghostty or on non-macOS): when a `Mismatch` target's expected
+    /// chord matches a detected quirk's trigger, the machine-generated
+    /// Ghostty config fix (TASK-260713) rides along as two extra lines right
+    /// after the `MISMATCH` line.
+    pub(crate) fn summary_lines(&self, quirks: &[TerminalQuirk]) -> Vec<String> {
         let mut lines = Vec::new();
         let mut delivered = 0;
         let mut mismatched = 0;
@@ -171,26 +178,33 @@ impl VerifySession {
         for (target, outcome) in self.targets.iter().zip(&self.outcomes) {
             let chord = format_key_for_config(std::slice::from_ref(&target.chord));
             let actions = target.actions.join(", ");
-            let line = match outcome {
+            match outcome {
                 Some(ChordOutcome::Delivered) => {
                     delivered += 1;
-                    format!("delivered  {chord}  ({actions})")
+                    lines.push(format!("delivered  {chord}  ({actions})"));
                 }
                 Some(ChordOutcome::Mismatch(actual)) => {
                     mismatched += 1;
                     super_undelivered |= target.chord.modifiers.contains_super();
-                    format!("MISMATCH   {chord}  arrived as {actual}  ({actions})")
+                    lines.push(format!(
+                        "MISMATCH   {chord}  arrived as {actual}  ({actions})"
+                    ));
+                    if let Some(suggestion) =
+                        matching_quirk(quirks, &target.chord).and_then(suggest_ghostty_fix)
+                    {
+                        lines.push(format!("fix: {}", suggestion.config_line));
+                        lines.push(format!("     {}", suggestion.reason));
+                    }
                 }
                 Some(ChordOutcome::Skipped) => {
                     skipped += 1;
-                    format!("skipped    {chord}  ({actions})")
+                    lines.push(format!("skipped    {chord}  ({actions})"));
                 }
                 None => {
                     untested += 1;
-                    format!("untested   {chord}  ({actions})")
+                    lines.push(format!("untested   {chord}  ({actions})"));
                 }
             };
-            lines.push(line);
         }
 
         lines.push(format!(
@@ -205,6 +219,12 @@ impl VerifySession {
         }
         lines
     }
+}
+
+/// Finds the detected quirk (if any) whose trigger is the expected chord, so
+/// a `Mismatch` report line can be paired with `suggest_ghostty_fix`.
+fn matching_quirk<'a>(quirks: &'a [TerminalQuirk], chord: &KeyEvent) -> Option<&'a TerminalQuirk> {
+    quirks.iter().find(|quirk| quirk.trigger == *chord)
 }
 
 /// CLI entry: loads bindings, runs the interactive loop, prints and persists
@@ -229,7 +249,11 @@ pub(crate) fn run_keymap_verify() -> i32 {
         }
     };
 
-    let lines = session.summary_lines();
+    // Cheap and already guarded by TERM_PROGRAM=ghostty (input/quirks.rs
+    // module docs); calling it once here is fine even outside Ghostty, where
+    // it just yields an empty Vec.
+    let quirks = quirks::detect();
+    let lines = session.summary_lines(&quirks);
     println!();
     for line in &lines {
         println!("{line}");
@@ -444,7 +468,10 @@ mod tests {
         VerifySession, VerifyState, current_terminal_identity, load_disabled_chords,
         persist_report,
     };
-    use crate::keymap::{Binding, EditorAction, Source, parse_key_sequence};
+    use crate::{
+        input::quirks::parse_ghostty_keybinds,
+        keymap::{Binding, EditorAction, Source, parse_key_sequence},
+    };
 
     fn binding(keys: &str, action: EditorAction, source: Source) -> Binding {
         Binding::new(parse_key_sequence(keys).unwrap(), action, None, source)
@@ -526,7 +553,7 @@ mod tests {
         assert_eq!(session.feed(chord("ctrl+c")), FeedResult::Aborted);
         assert_eq!(session.outcomes, vec![None, None]);
 
-        let summary = session.summary_lines();
+        let summary = session.summary_lines(&[]);
         assert!(
             summary
                 .iter()
@@ -557,7 +584,7 @@ mod tests {
         let mut session = VerifySession::from_bindings(&bindings);
         session.feed(chord("ctrl+z"));
 
-        let summary = session.summary_lines();
+        let summary = session.summary_lines(&[]);
         assert!(
             summary.iter().any(|line| line.contains("--cmd=ctrl")),
             "{summary:?}"
@@ -566,11 +593,56 @@ mod tests {
         // ...but not when everything arrived
         let mut session = VerifySession::from_bindings(&bindings);
         session.feed(chord("cmd+z"));
-        let summary = session.summary_lines();
+        let summary = session.summary_lines(&[]);
         assert!(
             !summary.iter().any(|line| line.contains("--cmd=ctrl")),
             "{summary:?}"
         );
+    }
+
+    /// Mismatch report lines get the machine-generated Ghostty fix appended
+    /// when the expected chord matches a detected quirk's trigger
+    /// (TASK-260713).
+    ///
+    /// The three asserted lines are quoted verbatim in README.md's
+    /// "Terminal setup (macOS)" example — if this test changes, update the
+    /// README block too.
+    #[test]
+    fn summary_appends_suggested_fix_when_a_mismatch_matches_a_detected_quirk() {
+        let bindings = vec![binding("cmd+z", EditorAction::EditUndo, Source::Imported)];
+        let mut session = VerifySession::from_bindings(&bindings);
+        session.feed(chord("ctrl+z")); // terminal delivered ctrl+z instead of cmd+z
+
+        let quirks = parse_ghostty_keybinds("keybind = super+z=undo\n");
+        let summary = session.summary_lines(&quirks);
+
+        let mismatch_index = summary
+            .iter()
+            .position(|line| line.starts_with("MISMATCH"))
+            .expect("a mismatch line is present");
+        assert_eq!(
+            summary[mismatch_index],
+            "MISMATCH   cmd+z  arrived as Ctrl+Z  (edit.undo)"
+        );
+        assert_eq!(summary[mismatch_index + 1], "fix: keybind = super+z=unbind");
+        assert_eq!(
+            summary[mismatch_index + 2],
+            "     once unbound the key falls through and is encoded via the kitty keyboard \
+             protocol. Apply, restart Ghostty (reload is not enough), then re-run \
+             `coda keymap verify`."
+        );
+    }
+
+    /// A mismatch with no corresponding quirk (e.g. outside Ghostty) must not
+    /// grow extra lines.
+    #[test]
+    fn summary_omits_fix_lines_when_no_quirk_matches_the_mismatch() {
+        let bindings = vec![binding("cmd+z", EditorAction::EditUndo, Source::Imported)];
+        let mut session = VerifySession::from_bindings(&bindings);
+        session.feed(chord("ctrl+z"));
+
+        let summary = session.summary_lines(&[]);
+        assert!(!summary.iter().any(|line| line.starts_with("fix:")));
     }
 
     #[test]

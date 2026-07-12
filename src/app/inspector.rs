@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use crate::{
     input::{
         CapabilityDetection, Key, KeyEvent, Modifiers, escape_bytes,
-        quirks::{QuirkEffect, TerminalQuirk},
+        quirks::{QuirkEffect, TerminalQuirk, suggest_ghostty_fix},
     },
     keymap::{Binding, EditorContext, ResolveResult, Resolver, Source},
     ui::{Screen, Style},
@@ -117,8 +117,18 @@ pub fn format_record(
         format!("key: {event}"),
         resolved_line(event, resolver, context),
     ];
-    if let Some(note) = quirk_note(event, quirks) {
-        lines.push(note);
+    if let Some(quirk) = matching_translated_quirk(event, quirks) {
+        lines.push(format!(
+            "note: Ghostty rewrites {} to this key ({})",
+            quirk.trigger, quirk.source_line
+        ));
+        // The suggested fix rides along with the note: a quirk warning
+        // without an actionable next step is a dead end (TASK-260713,
+        // ADR-0001 explainability principle).
+        if let Some(suggestion) = suggest_ghostty_fix(quirk) {
+            lines.push(format!("fix: {}", suggestion.config_line));
+            lines.push(format!("     {}", suggestion.reason));
+        }
     }
     lines
 }
@@ -202,17 +212,19 @@ fn source_name(source: Source) -> &'static str {
     }
 }
 
-/// Notes when the observed event matches the translated target of a known
-/// Ghostty quirk (e.g. the user pressed `Opt+Left`, Ghostty rewrote it to
-/// `Alt+B`, and `Alt+B` is what we just decoded) — the "terminal is
-/// intercepting this" explanation the dogfood feedback asked for.
-fn quirk_note(event: &KeyEvent, quirks: &[TerminalQuirk]) -> Option<String> {
-    quirks.iter().find_map(|quirk| match &quirk.effect {
-        QuirkEffect::Translated { events, .. } if events.first() == Some(event) => Some(format!(
-            "note: Ghostty rewrites {} to this key ({})",
-            quirk.trigger, quirk.source_line
-        )),
-        _ => None,
+/// Finds the quirk whose translated target matches the observed event (e.g.
+/// the user pressed `Opt+Left`, Ghostty rewrote it to `Alt+B`, and `Alt+B` is
+/// what we just decoded) — the "terminal is intercepting this" explanation
+/// the dogfood feedback asked for. `Consumed` quirks can never match here:
+/// the original keystroke never reaches this program's stdin at all, so
+/// there is nothing to observe it against.
+fn matching_translated_quirk<'a>(
+    event: &KeyEvent,
+    quirks: &'a [TerminalQuirk],
+) -> Option<&'a TerminalQuirk> {
+    quirks.iter().find(|quirk| match &quirk.effect {
+        QuirkEffect::Translated { events, .. } => events.first() == Some(event),
+        QuirkEffect::Consumed { .. } => false,
     })
 }
 
@@ -378,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn format_record_notes_ghostty_translation_when_event_matches_a_quirk_target() {
+    fn format_record_notes_ghostty_translation_and_appends_the_suggested_fix() {
         let resolver = macos_resolver();
         let context = EditorContext::default();
         let quirks = parse_ghostty_keybinds("keybind = alt+arrow_left=esc:b\n");
@@ -387,9 +399,17 @@ mod tests {
         let lines = format_record(&[0x1b, b'b'], &event, &resolver, &context, &quirks);
 
         assert_eq!(
-            lines.last().unwrap(),
+            lines[3],
             "note: Ghostty rewrites Alt+Left to this key (alt+arrow_left=esc:b)"
         );
+        assert_eq!(lines[4], "fix: keybind = alt+arrow_left=unbind");
+        assert_eq!(
+            lines[5],
+            "     once unbound the key falls through and is encoded via the kitty keyboard \
+             protocol. Apply, restart Ghostty (reload is not enough), then re-run \
+             `coda keymap verify`."
+        );
+        assert_eq!(lines.len(), 6, "raw/key/resolved + note + fix + reason");
     }
 
     #[test]
