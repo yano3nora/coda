@@ -37,6 +37,11 @@ pub struct AppConfig {
     /// warning is shown. The detection itself always runs — this only gates
     /// the status-bar message (SPEC-0005).
     pub capability_warning: bool,
+    /// Explicit Ctrl+C behavior. `false` preserves the safe copy default;
+    /// users who have verified Cmd+C delivery may opt into quit.
+    pub ctrl_c_quits: bool,
+    /// Chords measured as mismatched for the current terminal identity.
+    pub disabled_chords: Vec<KeyEvent>,
 }
 
 impl Default for AppConfig {
@@ -49,6 +54,8 @@ impl Default for AppConfig {
             sequence_timeout_ms: DEFAULT_SEQUENCE_TIMEOUT_MS,
             palette_key: None,
             capability_warning: true,
+            ctrl_c_quits: false,
+            disabled_chords: Vec::new(),
         }
     }
 }
@@ -86,6 +93,7 @@ pub(crate) fn load_from_base_dir(base_dir: &Path) -> AppConfig {
     let mut config = load_config_toml(&base_dir.join("config.toml"), &mut warnings);
 
     config.user_bindings = bindings;
+    config.disabled_chords = super::verify_cli::load_disabled_chords(base_dir, &mut warnings);
     config.warnings = warnings;
     config
 }
@@ -181,6 +189,16 @@ fn load_config_toml(path: &Path, warnings: &mut Vec<String>) -> AppConfig {
         None => {}
     }
 
+    match keymap.and_then(|keymap| keymap.get("ctrl_c")) {
+        Some(toml::Value::String(value)) if value == "copy" => config.ctrl_c_quits = false,
+        Some(toml::Value::String(value)) if value == "quit" => config.ctrl_c_quits = true,
+        Some(other) => warnings.push(format!(
+            "{}: keymap.ctrl_c must be \"copy\" or \"quit\", got {other}; using copy",
+            path.display()
+        )),
+        None => {}
+    }
+
     match value
         .get("terminal")
         .and_then(|terminal| terminal.get("capability_warning"))
@@ -258,6 +276,7 @@ wrap = false  # visual line wrap; toggle at runtime with view.toggleWrap (alt+z)
 [keymap]
 sequence_timeout_ms = 800     # pending key sequence wait before the exact match fires
 palette_key = \"ctrl+space\"    # palette convenience key; F1 always works
+ctrl_c = \"copy\"               # \"copy\" | \"quit\"; quit keeps unsaved-change confirmation
 
 [terminal]
 capability_warning = true  # startup warning when the terminal cannot distinguish modified keys

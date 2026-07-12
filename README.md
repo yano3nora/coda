@@ -140,6 +140,7 @@ wrap = false                  # 起動時の visual line wrap (alt+z で切替)
 [keymap]
 sequence_timeout_ms = 800     # key sequence の待機時間
 palette_key = "ctrl+space"    # palette の便宜キー (F1 は常に有効)
+ctrl_c = "copy"               # "quit" にすると Ctrl+C で終了 (未保存確認あり)
 
 [terminal]
 capability_warning = true     # 起動時の legacy terminal 警告

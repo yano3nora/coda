@@ -92,7 +92,7 @@ SPEC-0003(deliverability の非可査性)、SPEC-0004(--cmd オプション、re
 ## Open Questions
 
 - ~~Ghostty で Cmd+Shift 全般が届かないのか、予約キー個別問題か~~ → 解決(2026-07-05): per-key 予約。未 binding の super combo は透過される
-- verify 結果の保存形式・場所(`~/.config/<app>/` 配下)と、terminal が変わったときの無効化条件(`TERM_PROGRAM` + version をキーにする等)
+- ~~verify 結果の保存形式・場所と terminal 変更時の無効化条件~~ → 解決 (2026-07-13): `keymap-verification.json` に保存し、`TERM_PROGRAM` + `TERM_PROGRAM_VERSION` の完全一致時だけ mismatch chord を resolver から除外する
 - verify を import フローに組み込むか(import 直後に「5 個の binding が未検証です。今すぐ verify しますか」)
 - ~~`super+c/v/z/a` 等の案内方針~~ → 一部解決(ADR-0008): paste とマウス選択 copy は terminal に委譲するため配達不要。editor 内部が必須な select all / undo / キーボード選択 copy のみ、代替キー変換または terminal 側 keybind 解除を report で案内する
 
@@ -103,3 +103,5 @@ SPEC-0003(deliverability の非可査性)、SPEC-0004(--cmd オプション、re
   Accepted へ ([TASK](TASK-260712-mouse-verify-inactive-ssh.md))。verify は report 出力
   (`import-reports/latest-verify.txt`) まで。結果の永続化と resolver への反映は
   Open Question のまま。決定 4 の OS 予約キー分類は未実装 (backlog)。
+- 2026-07-13: verify state の terminal identity 別永続化、mismatch chord の
+  resolver 除外、決定 4 の OS 予約キー分類を実装。

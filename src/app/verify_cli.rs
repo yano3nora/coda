@@ -10,7 +10,9 @@
 //! the style of `input::inspect_key`, not the editor event loop.
 
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::{env, fs, path::Path};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{
     input::{
@@ -62,14 +64,44 @@ pub(crate) struct VerifySession {
     index: usize,
 }
 
+const VERIFY_STATE_SCHEMA: u32 = 1;
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct TerminalIdentity {
+    program: String,
+    version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct VerifyState {
+    schema_version: u32,
+    terminal: TerminalIdentity,
+    chords: Vec<StoredChordOutcome>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredChordOutcome {
+    chord: String,
+    outcome: String,
+}
+
+fn current_terminal_identity() -> TerminalIdentity {
+    TerminalIdentity {
+        program: env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string()),
+        version: env::var("TERM_PROGRAM_VERSION").unwrap_or_else(|_| "unknown".to_string()),
+    }
+}
+
 impl VerifySession {
-    /// Collects the unique chords of every *imported* binding (ADR-0007:
-    /// verify measures what the import brought in; defaults and user
-    /// bindings are hand-written for this terminal already). Sequences
-    /// contribute each of their chords individually.
+    /// Collects unique chords from imported bindings plus every Super chord
+    /// in defaults/user bindings. Super delivery is reserved per key, so
+    /// even built-in Cmd gestures need measurement. Sequences contribute
+    /// each chord individually.
     pub(crate) fn from_bindings(bindings: &[Binding]) -> Self {
         let mut targets: Vec<VerifyTarget> = Vec::new();
-        for binding in bindings.iter().filter(|b| b.source == Source::Imported) {
+        for binding in bindings.iter().filter(|b| {
+            b.source == Source::Imported || b.keys.iter().any(|key| key.modifiers.contains_super())
+        }) {
             for chord in &binding.keys {
                 let action = binding.action.to_string();
                 match targets.iter_mut().find(|target| target.chord == *chord) {
@@ -179,11 +211,13 @@ impl VerifySession {
 /// the report. Returns the process exit code.
 pub(crate) fn run_keymap_verify() -> i32 {
     let loaded = config::load();
-    let session = VerifySession::from_bindings(&loaded.user_bindings);
+    // Verify default Cmd bindings as well as imported bindings. Per-key
+    // reservation means Cmd+S succeeding says nothing about Cmd+C.
+    let mut bindings = super::default_bindings::bindings_with_ctrl_c_quit(loaded.ctrl_c_quits);
+    bindings.extend(loaded.user_bindings);
+    let session = VerifySession::from_bindings(&bindings);
     if session.is_empty() {
-        println!(
-            "keymap verify: no imported bindings found; run `coda keymap import vscode <path>` first"
-        );
+        println!("keymap verify: no imported or Cmd/Super bindings found");
         return 0;
     }
 
@@ -202,7 +236,7 @@ pub(crate) fn run_keymap_verify() -> i32 {
     }
 
     let base_dir = config_base_dir();
-    match persist_report(base_dir.as_deref(), &lines) {
+    match persist_results(base_dir.as_deref(), &lines, &session) {
         Ok(()) => {
             let path = base_dir
                 .expect("persist_report succeeded only when a config base exists")
@@ -231,6 +265,79 @@ fn persist_report(base_dir: Option<&Path>, lines: &[String]) -> io::Result<()> {
     let mut body = lines.join("\n");
     body.push('\n');
     write_parented(&path, body.as_bytes())
+}
+
+fn persist_results(
+    base_dir: Option<&Path>,
+    lines: &[String],
+    session: &VerifySession,
+) -> io::Result<()> {
+    persist_report(base_dir, lines)?;
+    let base_dir = base_dir.expect("persist_report validated the config root");
+    let state = VerifyState {
+        schema_version: VERIFY_STATE_SCHEMA,
+        terminal: current_terminal_identity(),
+        chords: session
+            .targets
+            .iter()
+            .zip(&session.outcomes)
+            .map(|(target, outcome)| StoredChordOutcome {
+                chord: format_key_for_config(std::slice::from_ref(&target.chord)),
+                outcome: match outcome {
+                    Some(ChordOutcome::Delivered) => "delivered",
+                    Some(ChordOutcome::Mismatch(_)) => "mismatched",
+                    Some(ChordOutcome::Skipped) => "skipped",
+                    None => "untested",
+                }
+                .to_string(),
+            })
+            .collect(),
+    };
+    let mut body =
+        serde_json::to_vec_pretty(&state).map_err(|error| io::Error::other(error.to_string()))?;
+    body.push(b'\n');
+    write_parented(&base_dir.join("keymap-verification.json"), &body)
+}
+
+/// Loads mismatched chords only when the complete terminal identity matches.
+/// Corrupt/stale state is ignored with a warning so startup always succeeds.
+pub(crate) fn load_disabled_chords(base_dir: &Path, warnings: &mut Vec<String>) -> Vec<KeyEvent> {
+    let path = base_dir.join("keymap-verification.json");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            warnings.push(format!("{}: {error}; ignored verify state", path.display()));
+            return Vec::new();
+        }
+    };
+    let state: VerifyState = match serde_json::from_str(&text) {
+        Ok(state) => state,
+        Err(error) => {
+            warnings.push(format!("{}: {error}; ignored verify state", path.display()));
+            return Vec::new();
+        }
+    };
+    if state.schema_version != VERIFY_STATE_SCHEMA || state.terminal != current_terminal_identity()
+    {
+        return Vec::new();
+    }
+    state
+        .chords
+        .into_iter()
+        .filter(|entry| entry.outcome == "mismatched")
+        .filter_map(|entry| match crate::keymap::parse_key_chord(&entry.chord) {
+            Ok(chord) => Some(chord),
+            Err(error) => {
+                warnings.push(format!(
+                    "{}: invalid verified chord {:?} ({error}); ignored",
+                    path.display(),
+                    entry.chord
+                ));
+                None
+            }
+        })
+        .collect()
 }
 
 /// Raw-mode read loop. Restores the terminal before returning so the caller
@@ -332,7 +439,11 @@ fn write_raw_line(stdout: &mut impl Write, line: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChordOutcome, FeedResult, VerifySession, persist_report};
+    use super::{
+        ChordOutcome, FeedResult, StoredChordOutcome, TerminalIdentity, VERIFY_STATE_SCHEMA,
+        VerifySession, VerifyState, current_terminal_identity, load_disabled_chords,
+        persist_report,
+    };
     use crate::keymap::{Binding, EditorAction, Source, parse_key_sequence};
 
     fn binding(keys: &str, action: EditorAction, source: Source) -> Binding {
@@ -466,5 +577,55 @@ mod tests {
     fn persist_report_rejects_a_missing_config_root() {
         let error = persist_report(None, &["summary".to_string()]).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn verify_state_disables_only_mismatches_for_matching_terminal() {
+        let base = std::env::temp_dir().join(format!(
+            "coda-verify-state-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let state = VerifyState {
+            schema_version: VERIFY_STATE_SCHEMA,
+            terminal: current_terminal_identity(),
+            chords: vec![
+                StoredChordOutcome {
+                    chord: "cmd+c".to_string(),
+                    outcome: "mismatched".to_string(),
+                },
+                StoredChordOutcome {
+                    chord: "cmd+s".to_string(),
+                    outcome: "delivered".to_string(),
+                },
+            ],
+        };
+        std::fs::write(
+            base.join("keymap-verification.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        assert_eq!(
+            load_disabled_chords(&base, &mut warnings),
+            vec![chord("cmd+c")]
+        );
+        assert!(warnings.is_empty());
+
+        let stale = VerifyState {
+            terminal: TerminalIdentity {
+                program: "different".to_string(),
+                version: "0".to_string(),
+            },
+            ..state
+        };
+        std::fs::write(
+            base.join("keymap-verification.json"),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+        assert!(load_disabled_chords(&base, &mut warnings).is_empty());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

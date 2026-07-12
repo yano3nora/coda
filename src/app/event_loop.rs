@@ -254,6 +254,37 @@ impl EventLoop {
         })
     }
 
+    /// Rebuilds only the default Ctrl+C policy while preserving user and
+    /// imported bindings and their higher source priority.
+    pub(crate) fn set_ctrl_c_quits(&mut self, enabled: bool) {
+        let mut bindings = default_bindings::bindings_with_ctrl_c_quit(enabled);
+        bindings.extend(
+            self.resolver
+                .bindings()
+                .iter()
+                .filter(|binding| binding.source != crate::keymap::Source::Default)
+                .cloned(),
+        );
+        self.resolver = Resolver::new(bindings);
+    }
+
+    /// Removes every binding containing a chord measured as mismatched for
+    /// this exact terminal program/version. Sequences are atomic: if one
+    /// chord cannot arrive, the whole binding is unusable.
+    pub(crate) fn disable_chords(&mut self, disabled: &[KeyEvent]) {
+        if disabled.is_empty() {
+            return;
+        }
+        let bindings = self
+            .resolver
+            .bindings()
+            .iter()
+            .filter(|binding| !binding.keys.iter().any(|key| disabled.contains(key)))
+            .cloned()
+            .collect();
+        self.resolver = Resolver::new(bindings);
+    }
+
     /// Applies the `[editor] wrap` startup default from config.toml
     /// (TASK-260711-18); `view.toggleWrap` flips it at runtime.
     pub(crate) fn set_wrap(&mut self, wrap: bool) {

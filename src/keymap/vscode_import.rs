@@ -200,6 +200,19 @@ fn classify_entry(
         None => None,
     };
 
+    // Reservation belongs to the original VS Code gesture. Check before
+    // `--cmd=ctrl|both`; remapping Cmd+Q must not make an inherently
+    // non-portable source binding look successfully imported.
+    if sequence_contains_os_reserved_key(&parsed_keys) {
+        report.unsupported_commands.push(ReportEntry::new(
+            Some(format_key_for_config(&parsed_keys)),
+            Some(action.as_str().to_string()),
+            parsed_when.as_ref().map(ToString::to_string),
+            "OS/terminal reserved",
+        ));
+        return 0;
+    }
+
     // ADR-0007 §3: `--cmd=ctrl`/`--cmd=both` only ever touch chords that
     // actually carry Super — a sequence with no Super chord at all is
     // classified exactly once, identically to `Keep`.
@@ -367,6 +380,19 @@ fn finalize_binding(
         ));
     }
     bindings.push(binding);
+}
+
+/// Universally non-portable combinations explicitly named by ADR-0007 §4.
+/// Keep this list deliberately small: terminal-specific reservations belong
+/// to quirks/verify, not to an ever-growing guessed database.
+fn sequence_contains_os_reserved_key(keys: &[KeyEvent]) -> bool {
+    keys.iter().any(|key| {
+        key.modifiers.contains_super()
+            && !key.modifiers.contains_ctrl()
+            && !key.modifiers.contains_alt()
+            && !key.modifiers.contains_shift()
+            && matches!(key.key, Key::Char('q') | Key::Tab)
+    })
 }
 
 /// A previously-classified binding can be sitting in either `imported` or
@@ -1111,5 +1137,33 @@ mod tests {
             report.contains("- ctrl+n -> cursor.down [suggestVisible]"),
             "{report}"
         );
+    }
+
+    #[test]
+    fn os_reserved_cmd_keys_are_unsupported_before_cmd_remapping() {
+        for strategy in [CmdStrategy::Keep, CmdStrategy::Ctrl, CmdStrategy::Both] {
+            let imported = import_vscode_keybindings(
+                r#"[
+                    { "key": "cmd+q", "command": "workbench.action.files.save" },
+                    { "key": "cmd+tab", "command": "workbench.action.files.save" }
+                ]"#,
+                &KeyboardCapabilities::modern(),
+                strategy,
+            )
+            .unwrap();
+            assert!(imported.bindings.is_empty(), "{strategy:?}");
+            assert_eq!(
+                imported.report.unsupported_commands.len(),
+                2,
+                "{strategy:?}"
+            );
+            assert!(
+                imported
+                    .report
+                    .unsupported_commands
+                    .iter()
+                    .all(|entry| entry.reason == "OS/terminal reserved")
+            );
+        }
     }
 }

@@ -93,6 +93,8 @@ fn run_editor(paths: Vec<PathBuf>) -> i32 {
                 loaded_config.sequence_timeout_ms,
             ));
             loop_.set_capability_warning(loaded_config.capability_warning);
+            loop_.set_ctrl_c_quits(loaded_config.ctrl_c_quits);
+            loop_.disable_chords(&loaded_config.disabled_chords);
             if let Some(palette_key) = loaded_config.palette_key {
                 loop_.set_palette_key(palette_key);
             }

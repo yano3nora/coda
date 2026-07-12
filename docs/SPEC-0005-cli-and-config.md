@@ -74,6 +74,7 @@ editor 内 command(command palette 経由):
 [keymap]
 sequence_timeout_ms = 800     # key sequence の待機時間 (SPEC-0002)
 palette_key = "ctrl+space"    # palette の便宜キー。F1 は常に有効 (SPEC-0002)
+ctrl_c = "copy"               # "copy" | "quit"。自動切替はしない
 
 [terminal]
 capability_warning = true   # 起動時の capability warning 表示

@@ -218,3 +218,5 @@ CLI(詳細は SPEC-0005):
   ([TASK](TASK-260712-which-key-config-cmd.md) /
   [TASK](TASK-260712-mouse-verify-inactive-ssh.md))。OS 予約キーの
   `Unsupported: OS/terminal reserved` 分類は未実装 (backlog)。
+- 2026-07-13: `Cmd+Q` / `Cmd+Tab` を cmd remap より先に
+  `Unsupported: OS/terminal reserved` へ分類する処理を実装。

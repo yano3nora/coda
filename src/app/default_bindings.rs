@@ -323,6 +323,12 @@ const COMMON: &[RawBinding] = &[
         Source::Default,
     ),
     (
+        "cmd+c",
+        EditorAction::EditCopy,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
         "ctrl+x",
         EditorAction::EditCut,
         Some("textInputFocus"),
@@ -346,7 +352,20 @@ const COMMON: &[RawBinding] = &[
         Some("textInputFocus"),
         Source::Default,
     ),
+    (
+        "cmd+z",
+        EditorAction::EditUndo,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
+        "cmd+shift+z",
+        EditorAction::EditRedo,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
     ("ctrl+s", EditorAction::FileSave, None, Source::Default),
+    ("cmd+s", EditorAction::FileSave, None, Source::Default),
     ("ctrl+g", EditorAction::GoToLine, None, Source::Default),
     ("ctrl+tab", EditorAction::BufferNext, None, Source::Default),
     (
@@ -514,9 +533,27 @@ pub fn bindings() -> Vec<Binding> {
     bindings_for(Platform::current())
 }
 
+/// Applies the explicit Ctrl+C policy. This is intentionally configuration,
+/// not a verify-driven automatic switch: changing terminal delivery must
+/// never turn a copy gesture into quit without the user's consent.
+pub fn bindings_with_ctrl_c_quit(ctrl_c_quits: bool) -> Vec<Binding> {
+    let mut bindings = bindings();
+    if ctrl_c_quits {
+        let ctrl_c = parse_key_sequence("ctrl+c").expect("default binding key is valid");
+        bindings.retain(|binding| binding.keys != ctrl_c);
+        bindings.push(Binding::new(
+            ctrl_c,
+            EditorAction::AppQuit,
+            None,
+            Source::Default,
+        ));
+    }
+    bindings
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Platform, bindings, bindings_for};
+    use super::{Platform, bindings, bindings_for, bindings_with_ctrl_c_quit};
     use crate::keymap::{EditorAction, EditorContext, ResolveResult, Resolver};
 
     #[test]
@@ -557,6 +594,23 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn ctrl_c_changes_to_quit_only_when_explicitly_enabled() {
+        let context = EditorContext {
+            text_input_focus: true,
+            ..EditorContext::default()
+        };
+        let key = ["ctrl+c".parse().unwrap()];
+        assert_eq!(
+            Resolver::new(bindings_with_ctrl_c_quit(false)).resolve(&key, &context),
+            ResolveResult::Matched(EditorAction::EditCopy)
+        );
+        assert_eq!(
+            Resolver::new(bindings_with_ctrl_c_quit(true)).resolve(&key, &context),
+            ResolveResult::Matched(EditorAction::AppQuit)
+        );
     }
 
     #[test]
