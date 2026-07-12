@@ -8,6 +8,11 @@ use super::{
     undo::{EditGroup, EditKind, EditOp, MergeInfo, UndoStack},
 };
 
+/// Fixed indent width for `indent`/`outdent` (TASK-260711-19 scope decision:
+/// no per-buffer/tab-vs-space config yet — that is future work).
+const INDENT_WIDTH: isize = 4;
+const INDENT_STR: &str = "    ";
+
 /// Cursor movement commands exposed by [`EditorCore::move_cursor`].
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Motion {
@@ -330,6 +335,96 @@ impl EditorCore {
             )
         });
         self.update_preferred();
+        self.record_line_replace_group(LineReplaceUndo {
+            start: start_line,
+            old,
+            new,
+            cursor_before: before_cursor,
+            selection_before: before_selection,
+            cursor_after: self.cursor,
+            selection_after: self.selection,
+        });
+    }
+
+    /// Indents the current line, or every line touched by the selection, by
+    /// [`INDENT_WIDTH`] spaces. Mirrors `move_lines_up`/`move_lines_down`:
+    /// the whole block is one undo group (TASK-260711-19).
+    pub fn indent(&mut self) {
+        self.apply_line_indent(|line| (format!("{INDENT_STR}{line}"), INDENT_WIDTH));
+    }
+
+    /// Outdents (removes one indent level from) the current line, or every
+    /// line touched by the selection. Each line loses a single leading tab,
+    /// or up to [`INDENT_WIDTH`] leading spaces — whichever is actually
+    /// present — so a block with mixed tab/space indentation degrades one
+    /// level per line instead of requiring uniform indentation
+    /// (TASK-260711-19).
+    pub fn outdent(&mut self) {
+        self.apply_line_indent(|line| {
+            if let Some(rest) = line.strip_prefix('\t') {
+                (rest.to_string(), -1)
+            } else {
+                let removable = line
+                    .chars()
+                    .take(INDENT_WIDTH as usize)
+                    .take_while(|character| *character == ' ')
+                    .count();
+                (
+                    line.chars().skip(removable).collect(),
+                    -(removable as isize),
+                )
+            }
+        });
+    }
+
+    /// Shared engine for `indent`/`outdent`: rewrites every line in the
+    /// current line block (selection, or just the cursor's line when there
+    /// is none) via `transform`, which returns each line's new content and
+    /// the signed grapheme delta that content change applies at column 0 of
+    /// that same line. The whole block change is recorded as a single
+    /// `ReplaceLines` undo group, identical in shape to
+    /// `record_line_replace_group` used by the line-move commands, so indent
+    /// and outdent get the same "one keypress, one undo" behavior for free.
+    fn apply_line_indent(&mut self, transform: impl Fn(&str) -> (String, isize)) {
+        let Some((start_line, end_line)) = self.selected_line_block() else {
+            return;
+        };
+
+        let old = self.lines_inclusive(start_line, end_line);
+        let mut new = Vec::with_capacity(old.len());
+        let mut deltas = Vec::with_capacity(old.len());
+        for line in &old {
+            let (new_line, delta) = transform(line);
+            new.push(new_line);
+            deltas.push(delta);
+        }
+        if new == old {
+            // Nothing changed (e.g. outdenting already-flush lines) — no-op,
+            // not an empty undo group.
+            return;
+        }
+
+        let before_cursor = self.cursor;
+        let before_selection = self.selection;
+        self.buffer
+            .replace_lines(start_line, end_line + 1, new.clone());
+
+        let shift = |pos: Position| {
+            if pos.line < start_line || pos.line > end_line {
+                return pos;
+            }
+            let delta = deltas[pos.line - start_line];
+            Position::new(pos.line, pos.grapheme.saturating_add_signed(delta))
+        };
+        self.cursor = self.buffer.clamp_position(shift(before_cursor));
+        self.selection = before_selection.map(|selection| {
+            Selection::new(
+                self.buffer.clamp_position(shift(selection.anchor)),
+                self.buffer.clamp_position(shift(selection.head)),
+            )
+        });
+        self.update_preferred();
+
         self.record_line_replace_group(LineReplaceUndo {
             start: start_line,
             old,
@@ -1017,6 +1112,95 @@ mod tests {
                     editor.delete_to_line_start();
                     assert_eq!(text(&editor), "abc", "case {name}");
                     assert!(!editor.undo(), "case {name}");
+                }
+            }
+        }
+    }
+
+    /// TASK-260711-19 testcases: `indent`/`outdent` table-driven over
+    /// multi-line selections, an unindented no-op, and mixed tab/space
+    /// content, each asserting the whole block undoes in a single call.
+    #[test]
+    fn indent_and_outdent_are_table_driven() {
+        enum Case {
+            IndentMultiLineSelection,
+            OutdentNoLeadingWhitespaceIsNoop,
+            OutdentMixedTabsAndSpaces,
+        }
+
+        let cases = [
+            (
+                "indent multi-line selection",
+                Case::IndentMultiLineSelection,
+            ),
+            (
+                "outdent no leading whitespace is a no-op",
+                Case::OutdentNoLeadingWhitespaceIsNoop,
+            ),
+            (
+                "outdent mixed tabs and spaces",
+                Case::OutdentMixedTabsAndSpaces,
+            ),
+        ];
+
+        for (name, case) in cases {
+            match case {
+                Case::IndentMultiLineSelection => {
+                    let mut editor = editor("foo\nbar\nbaz");
+                    let selection_before = Selection::new(Position::new(0, 0), Position::new(1, 3));
+                    editor.selection = Some(selection_before);
+                    editor.cursor = Position::new(1, 3);
+
+                    editor.indent();
+
+                    assert_eq!(text(&editor), "    foo\n    bar\nbaz", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(1, 7), "case {name}");
+                    assert_eq!(
+                        editor.selection,
+                        Some(Selection::new(Position::new(0, 4), Position::new(1, 7))),
+                        "case {name}"
+                    );
+
+                    assert!(editor.undo(), "case {name}: one undo call must revert");
+                    assert_eq!(text(&editor), "foo\nbar\nbaz", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(1, 3), "case {name}");
+                    assert_eq!(editor.selection, Some(selection_before), "case {name}");
+                }
+                Case::OutdentNoLeadingWhitespaceIsNoop => {
+                    let mut editor = editor("foo\nbar");
+                    editor.cursor = Position::new(0, 1);
+
+                    editor.outdent();
+
+                    assert_eq!(text(&editor), "foo\nbar", "case {name}");
+                    assert!(
+                        !editor.undo(),
+                        "case {name}: a no-op edit must not push an undo group"
+                    );
+                }
+                Case::OutdentMixedTabsAndSpaces => {
+                    let mut editor = editor("\tfoo\n  bar\n    baz");
+                    let selection_before = Selection::new(Position::new(0, 0), Position::new(2, 7));
+                    editor.selection = Some(selection_before);
+                    editor.cursor = Position::new(2, 7);
+
+                    editor.outdent();
+
+                    // One leading tab, two of four leading spaces, and a full
+                    // four leading spaces are each removed as a single level
+                    // (whichever is actually present on that line).
+                    assert_eq!(text(&editor), "foo\nbar\nbaz", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(2, 3), "case {name}");
+                    assert_eq!(
+                        editor.selection,
+                        Some(Selection::new(Position::new(0, 0), Position::new(2, 3))),
+                        "case {name}"
+                    );
+
+                    assert!(editor.undo(), "case {name}: one undo call must revert");
+                    assert_eq!(text(&editor), "\tfoo\n  bar\n    baz", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(2, 7), "case {name}");
+                    assert_eq!(editor.selection, Some(selection_before), "case {name}");
                 }
             }
         }

@@ -1,0 +1,63 @@
+# goreleaser には compile / archive / checksum / GitHub Release 作成だけを任せる。
+# version bump・check/test・tag 付け・人間による publish ゲートは scripts/release.ts 側に残す。
+# https://goreleaser.com/customization/builds/rust/
+version: 2
+
+project_name: coda
+
+# target を増減するときは scripts/release.ts の RUST_TARGETS と README の対応表も更新すること
+builds:
+  # macOS: zig を linker に使うと SDK の system library (iconv 等) 解決が壊れるため、
+  # 素の `cargo build` + system linker (Xcode CLT) で build する。macOS host 必須
+  - id: darwin
+    builder: rust
+    binary: coda
+    command: build
+    targets:
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+    flags:
+      - --release
+      # root Cargo.toml が [workspace] を持つようになった (xtask/) ため、cargo は
+      # 対象 package を明示しないと "which workspace to build" で失敗する。
+      # goreleaser 自体は member 一覧しか見ておらず root package を暗黙対象にしてくれないため明示する
+      - --package=coda
+  # Linux (gnu): `cargo zigbuild` が zig を linker に使い、glibc 2.17 を baseline に
+  # どの distro でも動く互換 binary を作る (macOS host からの cross compile)。
+  # `.2.17` suffix が zig の glibc target version 指定 (無指定だと host 都合の
+  # 新しい glibc symbol を参照してしまい、古い distro で起動しなくなる)
+  - id: linux
+    builder: rust
+    binary: coda
+    targets:
+      - x86_64-unknown-linux-gnu.2.17
+      - aarch64-unknown-linux-gnu.2.17
+    flags:
+      - --release
+      # 理由は darwin build の同コメント参照
+      - --package=coda
+
+archives:
+  # mise の GitHub backend (`mise use github:yano3nora/coda@<version>`) が OS / arch を
+  # asset 名から自動判定できるよう、gistan と同じ命名 (macos / x64) に揃える
+  - name_template: >-
+      {{ .ProjectName }}-v{{ .Version }}-{{ if eq .Os "darwin" }}macos{{ else }}{{ .Os }}{{ end }}-{{ if eq .Arch "amd64" }}x64{{ else }}{{ .Arch }}{{ end }}
+    formats: [tar.gz]
+    # archive にはバイナリのみ含める (README 等を同梱しない)。展開直下に coda が置かれる形
+    files:
+      - none*
+
+checksum:
+  algorithm: sha256
+  # asset ごとに個別の .sha256 を作る
+  split: true
+
+snapshot:
+  # tag なしの snapshot (release:prepare) でも asset 名を release 時と同じ形で
+  # 検証できるよう、prepare が渡す version を使う。手動実行など env が無い場合は
+  # goreleaser の既定 version にフォールバック
+  version_template: '{{ envOrDefault "CODA_RELEASE_VERSION" .Version }}'
+
+changelog:
+  # `gh release create --generate-notes` 相当。GitHub API で release notes を自動生成する
+  use: github-native

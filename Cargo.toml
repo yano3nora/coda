@@ -1,3 +1,10 @@
+[workspace]
+# root package (coda) 方式。src/ は動かさず、release 補助の xtask crate だけを member に足す
+# (docs/TASK-260712-release-xtask-migration.md)。素の `cargo build` は root package を
+# 暗黙のデフォルト対象にするが、goreleaser の Rust builder は workspace 化を検知すると
+# 対象 package の明示を要求するため、.goreleaser.yaml の build flags に --package=coda を追加した
+members = ["xtask"]
+
 [package]
 name = "coda"
 version = "0.1.0"

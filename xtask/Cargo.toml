@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# release script (旧 scripts/release.ts) の移植先。外部依存は持たない
+# (docs/TASK-260712-release-xtask-migration.md)。subprocess 実行・file IO・env 参照だけなので std で足りる
+[dependencies]

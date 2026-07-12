@@ -25,12 +25,13 @@ use crate::{
 };
 
 use super::{
-    clipboard, default_bindings,
-    document::Document,
+    clipboard, config, default_bindings,
+    document::{Document, SaveError},
     editor_view::StatusLine,
     file,
     inspector::{InspectorOverlay, draw_inspector, is_close_key},
     palette::{CommandPalette, filter_actions},
+    prompt_overlay::{PromptOutcome, PromptOverlay, PromptPurpose, draw_prompt_overlay},
     search_overlay::{SearchOverlay, draw_search_overlay},
 };
 
@@ -70,6 +71,30 @@ impl QuitGuard {
     }
 }
 
+/// Two-stage confirm for `file.save` hitting an external-change conflict
+/// (TASK-260712 Gate 1), mirroring `QuitGuard`: the first conflicting save
+/// only warns, the very next `file.save` forces the overwrite. Any other
+/// dispatched action resets it, so stepping away and coming back never
+/// silently forces a stale save.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+struct SaveConflictGuard {
+    warned: bool,
+}
+
+impl SaveConflictGuard {
+    fn should_force(&self) -> bool {
+        self.warned
+    }
+
+    fn warn(&mut self) {
+        self.warned = true;
+    }
+
+    fn reset(&mut self) {
+        self.warned = false;
+    }
+}
+
 pub struct EventLoop {
     documents: Vec<Document>,
     active: usize,
@@ -77,6 +102,9 @@ pub struct EventLoop {
     highlight_engine: HighlightEngine,
     palette: CommandPalette,
     search: SearchOverlay,
+    /// Generic single-line input overlay, currently only used for
+    /// `file.saveAs` (TASK-260712 Gate 1).
+    prompt: PromptOverlay,
     inspector: InspectorOverlay,
     message: String,
     clipboard: String,
@@ -85,6 +113,12 @@ pub struct EventLoop {
     pending_since: Option<Instant>,
     quit_guard: QuitGuard,
     close_guard: QuitGuard,
+    save_conflict_guard: SaveConflictGuard,
+    /// Save As target that was already warned about via "file exists;
+    /// enter again to overwrite" (TASK-260712 Gate 1). A resubmission with
+    /// a *different* path (typing more, or picking another purpose) is a
+    /// fresh attempt, not a confirmation, so this must match exactly.
+    save_as_overwrite_confirm: Option<PathBuf>,
     /// Ghostty keybind interception quirks detected at startup (ADR-0007
     /// decision 2(b)). Kept for the `:inspect-key` live mode (TASK-260711-17)
     /// to annotate incoming events, not just for the one-line startup warning.
@@ -98,6 +132,10 @@ pub struct EventLoop {
     /// is still pending; surfaced to the `:inspect-key` overlay's protocol
     /// line via `draw_inspector`.
     capability_detection: Option<CapabilityDetection>,
+    /// Visual line wrap (TASK-260711-18). One editor-wide flag, not
+    /// per-document: `view.toggleWrap` and the `[editor] wrap` config apply
+    /// to every buffer, mirroring how VS Code's setting behaves in practice.
+    wrap: bool,
 }
 
 impl EventLoop {
@@ -125,6 +163,12 @@ impl EventLoop {
             }
             if load_info.mixed_line_endings {
                 warnings.push(format!("{}: mixed line endings", document.display_name()));
+            }
+            if load_info.readonly {
+                warnings.push(format!(
+                    "{}: large file (>10 MB); opened read-only",
+                    document.display_name()
+                ));
             }
             documents.push(document);
         }
@@ -157,6 +201,7 @@ impl EventLoop {
             highlight_engine: HighlightEngine::new(theme),
             palette: CommandPalette::default(),
             search: SearchOverlay::default(),
+            prompt: PromptOverlay::default(),
             inspector: InspectorOverlay::default(),
             message: warnings.join("; "),
             clipboard: String::new(),
@@ -165,10 +210,19 @@ impl EventLoop {
             pending_since: None,
             quit_guard: QuitGuard::default(),
             close_guard: QuitGuard::default(),
+            save_conflict_guard: SaveConflictGuard::default(),
+            save_as_overwrite_confirm: None,
             ghostty_quirks,
             capability_probe: None,
             capability_detection: None,
+            wrap: false,
         })
+    }
+
+    /// Applies the `[editor] wrap` startup default from config.toml
+    /// (TASK-260711-18); `view.toggleWrap` flips it at runtime.
+    pub(crate) fn set_wrap(&mut self, wrap: bool) {
+        self.wrap = wrap;
     }
 
     /// Ghostty quirks detected at startup, for the `:inspect-key` live mode
@@ -282,6 +336,7 @@ impl EventLoop {
             syntax,
         );
         let modified = document.is_modified();
+        let wrap = self.wrap;
         document.view.draw(
             &document.editor,
             screen,
@@ -293,9 +348,11 @@ impl EventLoop {
                 pending: &pending,
             },
             1,
+            wrap,
         );
         let items = filter_actions(&self.palette.query, self.resolver.bindings());
         draw_search_overlay(screen, &self.search);
+        draw_prompt_overlay(screen, &self.prompt);
         // Inspector before palette: when both are visible, the palette (its
         // rescue entry point always wins per AGENTS.md) draws on top.
         draw_inspector(screen, &self.inspector, self.capability_detection);
@@ -376,6 +433,8 @@ impl EventLoop {
         let sanitized = text.replace('\n', "");
         if self.palette.visible {
             self.palette.push_text(&sanitized);
+        } else if self.prompt.visible {
+            self.prompt.paste_text(&sanitized);
         } else if self.inspector.visible {
             // Observe-only: record that a paste happened without ever
             // exposing its contents (design decision 260712).
@@ -383,7 +442,7 @@ impl EventLoop {
         } else if self.search.visible {
             let editor = &mut self.documents[self.active].editor;
             self.search.paste_text(&sanitized, editor);
-        } else {
+        } else if !self.block_if_readonly() {
             self.editor_mut().insert_text(text);
             self.editor_mut().commit_group();
             self.quit_guard.reset();
@@ -412,6 +471,10 @@ impl EventLoop {
             && let Some(decision) = self.handle_palette_key(&event)
         {
             return decision;
+        }
+
+        if self.prompt.visible {
+            return self.handle_prompt_key(&event);
         }
 
         if self.inspector.visible {
@@ -522,16 +585,25 @@ impl EventLoop {
                     && !event.modifiers.contains_alt()
                     && !event.modifiers.contains_super() =>
             {
+                if self.block_if_readonly() {
+                    return QuitDecision::Continue;
+                }
                 self.editor_mut().insert_text(&character.to_string());
                 self.quit_guard.reset();
                 self.close_guard.reset();
             }
             Key::Enter if event.modifiers == Modifiers::none() => {
+                if self.block_if_readonly() {
+                    return QuitDecision::Continue;
+                }
                 self.editor_mut().insert_text("\n");
                 self.quit_guard.reset();
                 self.close_guard.reset();
             }
             Key::Tab if event.modifiers == Modifiers::none() => {
+                if self.block_if_readonly() {
+                    return QuitDecision::Continue;
+                }
                 self.editor_mut().insert_text("\t");
                 self.quit_guard.reset();
                 self.close_guard.reset();
@@ -541,8 +613,31 @@ impl EventLoop {
         QuitDecision::Continue
     }
 
+    /// Shared guard for both literal-insertion paths (`handle_text_input`,
+    /// `handle_paste_input`) and the dispatch-level mutating-action check
+    /// (TASK-260712 Gate 1: large file protection). Sets the standard
+    /// message and reports whether the caller must stop ("黙って壊れない":
+    /// blocking always shows a message, never a silent no-op).
+    fn block_if_readonly(&mut self) -> bool {
+        if self.active_document().readonly {
+            self.message = "read-only buffer (large file)".to_string();
+            true
+        } else {
+            false
+        }
+    }
+
     fn dispatch(&mut self, action: EditorAction) -> QuitDecision {
         self.message.clear();
+        // Any dispatched action other than a repeated file.save interposes
+        // between the two stages of the mtime-conflict confirm, so it must
+        // reset the guard (task spec: "他の action を挟んだら reset").
+        if action != EditorAction::FileSave {
+            self.save_conflict_guard.reset();
+        }
+        if is_mutating_action(action) && self.block_if_readonly() {
+            return QuitDecision::Continue;
+        }
         match action {
             EditorAction::CursorUp => self.editor_mut().move_cursor(Motion::Up, false),
             EditorAction::CursorDown => self.editor_mut().move_cursor(Motion::Down, false),
@@ -603,6 +698,8 @@ impl EventLoop {
             EditorAction::EditInsertLineBefore => self.editor_mut().insert_line_before(),
             EditorAction::EditMoveLinesUp => self.editor_mut().move_lines_up(),
             EditorAction::EditMoveLinesDown => self.editor_mut().move_lines_down(),
+            EditorAction::EditIndent => self.editor_mut().indent(),
+            EditorAction::EditOutdent => self.editor_mut().outdent(),
             EditorAction::EditCopy => {
                 if let Some(text) = self.editor_mut().copy_text() {
                     self.copy_to_clipboards(text, "copied");
@@ -632,17 +729,12 @@ impl EventLoop {
                     self.message = "nothing to redo".to_string();
                 }
             }
-            EditorAction::FileSave => match self.active_document_mut().save() {
-                Ok(()) => {
-                    self.message = "saved".to_string();
-                    self.quit_guard.reset();
-                    self.close_guard.reset();
-                }
-                Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
-                    self.message = error.to_string();
-                }
-                Err(error) => self.message = format!("save failed: {error}"),
-            },
+            EditorAction::FileSave => {
+                self.handle_file_save();
+            }
+            EditorAction::FileSaveAs => {
+                self.open_save_as_prompt();
+            }
             EditorAction::BufferNew => {
                 self.documents.push(Document::unnamed());
                 self.active = self.documents.len() - 1;
@@ -664,6 +756,25 @@ impl EventLoop {
                 self.search.close();
                 self.inspector.open();
                 self.message = "inspect-key: press any key".to_string();
+            }
+            EditorAction::ViewToggleWrap => {
+                self.wrap = !self.wrap;
+                // top_segment is wrap-mode state; stale values would offset
+                // the next wrap-on viewport, so clear it on every toggle.
+                for document in &mut self.documents {
+                    document.view.top_segment = 0;
+                }
+                self.message = if self.wrap {
+                    "wrap: on".to_string()
+                } else {
+                    "wrap: off".to_string()
+                };
+            }
+            EditorAction::ConfigOpenSettings => {
+                self.open_config_document(config::settings_path(), config::SETTINGS_TEMPLATE)
+            }
+            EditorAction::ConfigOpenKeybindings => {
+                self.open_config_document(config::keybindings_path(), config::KEYBINDINGS_TEMPLATE)
             }
             EditorAction::SearchOpen => {
                 self.palette.close();
@@ -763,14 +874,141 @@ impl EventLoop {
         }
     }
 
+    /// `file.save`: writes to the current path, opening the Save As prompt
+    /// for an unnamed buffer and enforcing the two-stage confirm-then-force
+    /// flow for a file that changed on disk (TASK-260712 Gate 1; mirrors
+    /// `QuitGuard`).
+    fn handle_file_save(&mut self) -> QuitDecision {
+        let force = self.save_conflict_guard.should_force();
+        match self.active_document_mut().save(force) {
+            Ok(()) => {
+                self.message = format!("saved {}", self.active_document().display_name());
+                self.quit_guard.reset();
+                self.close_guard.reset();
+                self.save_conflict_guard.reset();
+            }
+            Err(SaveError::NoPath) => {
+                self.save_conflict_guard.reset();
+                self.open_save_as_prompt();
+            }
+            Err(SaveError::Conflict) => {
+                self.save_conflict_guard.warn();
+                self.message = "file changed on disk; save again to overwrite".to_string();
+            }
+            Err(SaveError::Readonly) => {
+                // `dispatch` already blocks file.save on a readonly
+                // document before reaching here; kept for defense in depth.
+                self.save_conflict_guard.reset();
+                self.message = "read-only buffer (large file)".to_string();
+            }
+            Err(SaveError::Io(error)) => {
+                self.save_conflict_guard.reset();
+                self.message = format!("save failed: {error}");
+            }
+        }
+        QuitDecision::Continue
+    }
+
+    /// `file.saveAs`: opens the generic prompt overlay pre-filled with the
+    /// current path (if any). Submission is handled by `perform_save_as`.
+    fn open_save_as_prompt(&mut self) {
+        self.search.close();
+        self.palette.close();
+        let initial = self
+            .active_document()
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        self.prompt.open(PromptPurpose::SaveAs, "Save As:", initial);
+        self.save_as_overwrite_confirm = None;
+    }
+
+    /// Feeds one key to the prompt overlay while it is visible. The overlay
+    /// itself consumes every key (`PromptOutcome` always resolves), so this
+    /// never falls through to the resolver/dispatch path.
+    fn handle_prompt_key(&mut self, event: &KeyEvent) -> QuitDecision {
+        match self.prompt.handle_key(event) {
+            PromptOutcome::Continue => QuitDecision::Continue,
+            PromptOutcome::Cancel => {
+                self.prompt.close();
+                self.message = "save as: cancelled".to_string();
+                QuitDecision::Continue
+            }
+            PromptOutcome::Submit => self.submit_prompt(),
+        }
+    }
+
+    /// Routes a submitted prompt to its purpose. Only `SaveAs` exists today.
+    fn submit_prompt(&mut self) -> QuitDecision {
+        let Some(purpose) = self.prompt.purpose else {
+            self.prompt.close();
+            return QuitDecision::Continue;
+        };
+        let input = self.prompt.input.trim().to_string();
+        if input.is_empty() {
+            self.message = "save as: path cannot be empty".to_string();
+            return QuitDecision::Continue;
+        }
+        match purpose {
+            PromptPurpose::SaveAs => self.perform_save_as(PathBuf::from(input)),
+        }
+    }
+
+    /// Save As target resolution: retargeting the document's own current
+    /// path falls back to the normal save flow (so the mtime-conflict guard
+    /// still applies); a genuinely different, already-existing path needs
+    /// its own "file exists" confirmation before the first write ever
+    /// happens (task spec: two-stage confirm, same shape as `QuitGuard`).
+    fn perform_save_as(&mut self, path: PathBuf) -> QuitDecision {
+        if self.active_document().path.as_ref() == Some(&path) {
+            self.prompt.close();
+            return self.handle_file_save();
+        }
+
+        if path.exists() && self.save_as_overwrite_confirm.as_deref() != Some(path.as_path()) {
+            self.save_as_overwrite_confirm = Some(path);
+            self.message = "file exists; enter again to overwrite".to_string();
+            return QuitDecision::Continue;
+        }
+
+        self.save_as_overwrite_confirm = None;
+        self.prompt.close();
+        let document = self.active_document_mut();
+        document.path = Some(path);
+        // A new target has no prior mtime on record, and the "file exists"
+        // step above (when it applied) already served as the overwrite
+        // confirmation, so this write always goes through regardless of
+        // whatever is currently on disk.
+        document.saved_mtime = None;
+        match document.save(true) {
+            Ok(()) => {
+                self.message = format!("saved {}", self.active_document().display_name());
+                self.quit_guard.reset();
+                self.close_guard.reset();
+            }
+            Err(error) => self.message = format!("save failed: {error}"),
+        }
+        QuitDecision::Continue
+    }
+
     fn context(&self) -> EditorContext {
         EditorContext {
-            editor_focus: !self.palette.visible && !self.search.visible,
-            text_input_focus: !self.palette.visible && !self.search.visible,
+            editor_focus: !self.palette.visible && !self.search.visible && !self.prompt.visible,
+            text_input_focus: !self.palette.visible && !self.search.visible && !self.prompt.visible,
             has_selection: self
                 .editor()
                 .selection
                 .is_some_and(|selection| !selection.is_empty()),
+            // TASK-260712 Gate 1: wires `Document::readonly` (large file
+            // protection) into the `when`-clause boundary type so imported
+            // bindings using `!isReadonly` (see vscode_when.rs) resolve
+            // correctly. Enforcement itself lives in `dispatch`/
+            // `handle_text_input`/`handle_paste_input`, not here — the
+            // default binding table does not gate mutating actions on this
+            // flag, so relying on it alone would silently do nothing rather
+            // than show a message ("黙って壊れない").
+            is_readonly: self.active_document().readonly,
             search_visible: self.search.context_flags().0,
             replace_visible: self.search.context_flags().1,
             command_palette_visible: self.palette.visible,
@@ -783,7 +1021,12 @@ impl EventLoop {
         if self.palette.visible {
             self.palette.close();
         } else {
+            // F1 bypasses the prompt/search key-consuming branches entirely
+            // (it is checked before them in `handle_key`), so this is the
+            // one place that must close them itself — the rescue entry
+            // point always wins (AGENTS.md).
             self.search.close();
+            self.prompt.close();
             self.palette.open();
         }
     }
@@ -804,6 +1047,41 @@ impl EventLoop {
         };
         self.search.close();
         self.close_guard.reset();
+    }
+
+    /// Opens (or focuses a freshly-created) config file as a new buffer for
+    /// `config.openSettings`/`config.openKeybindings` (TASK-260711-19).
+    ///
+    /// `path` is `None` when `HOME`/`XDG_CONFIG_HOME` cannot be resolved
+    /// (same fallback as `config::load()`), which must warn rather than
+    /// panic. When the file does not exist yet, `template` is inserted as
+    /// starting content so the buffer is never a blank surprise — but
+    /// nothing touches disk until the user explicitly saves (buffer.new /
+    /// unnamed-buffer precedent, AGENTS.md "黙って壊れない").
+    fn open_config_document(&mut self, path: Option<PathBuf>, template: &str) {
+        let Some(path) = path else {
+            self.message = "HOME is not set; cannot open config file".to_string();
+            return;
+        };
+        match Document::open(path) {
+            Ok((mut document, load_info)) => {
+                if load_info.is_new {
+                    // A brand-new buffer already carries an implicit final
+                    // newline (`TextBuffer::default()`'s `trailing_newline`,
+                    // core/buffer.rs), so a template ending in its own `\n`
+                    // would otherwise round-trip with a spurious blank last
+                    // line once saved.
+                    let template = template.strip_suffix('\n').unwrap_or(template);
+                    document.editor.insert_text(template);
+                    document.editor.commit_group();
+                }
+                self.documents.push(document);
+                self.active = self.documents.len() - 1;
+                self.search.close();
+                self.close_guard.reset();
+            }
+            Err(error) => self.message = error.to_string(),
+        }
     }
 
     fn close_active_buffer(&mut self) -> QuitDecision {
@@ -1006,6 +1284,36 @@ fn format_intercept_warning(affected: &[String]) -> Option<String> {
     ))
 }
 
+/// Actions that mutate the buffer or its persisted contents, blocked on a
+/// read-only document (large-file protection, TASK-260712 Gate 1). Cursor
+/// movement, selection, copy, search, buffer switching, palette/inspector,
+/// and quit are deliberately excluded — none of them touch buffer contents
+/// or disk.
+fn is_mutating_action(action: EditorAction) -> bool {
+    matches!(
+        action,
+        EditorAction::EditBackspace
+            | EditorAction::EditDelete
+            | EditorAction::EditDeleteWordLeft
+            | EditorAction::EditDeleteToLineStart
+            | EditorAction::EditInsertLineAfter
+            | EditorAction::EditInsertLineBefore
+            | EditorAction::EditMoveLinesUp
+            | EditorAction::EditMoveLinesDown
+            | EditorAction::EditIndent
+            | EditorAction::EditOutdent
+            | EditorAction::EditCut
+            | EditorAction::EditPaste
+            | EditorAction::EditUndo
+            | EditorAction::EditRedo
+            | EditorAction::ReplaceOpen
+            | EditorAction::ReplaceNext
+            | EditorAction::ReplaceAll
+            | EditorAction::FileSave
+            | EditorAction::FileSaveAs
+    )
+}
+
 fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut unique = Vec::new();
@@ -1036,22 +1344,23 @@ fn format_candidates(candidates: &[(Vec<KeyEvent>, EditorAction)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        EventLoop, QuitDecision, QuitGuard, TabItem, draw_tab_bar, format_intercept_warning,
-        ghostty_intercept_warning,
+        EventLoop, PromptPurpose, QuitDecision, QuitGuard, TabItem, draw_tab_bar,
+        format_intercept_warning, ghostty_intercept_warning,
     };
     use crate::{
         app::default_bindings::{Platform, bindings_for},
+        app::file::LARGE_FILE_BYTES,
         highlight::ThemeChoice,
         input::{
             CapabilityDetection, CapabilityProbe, InputEvent, Key, KeyEvent,
             quirks::parse_ghostty_keybinds,
         },
-        keymap::{EditorAction, Resolver},
+        keymap::{EditorAction, EditorContext, ResolveResult, Resolver},
         ui::Screen,
     };
     use std::{
         path::PathBuf,
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime},
     };
 
     fn buffer_text(event_loop: &EventLoop) -> String {
@@ -1267,6 +1576,22 @@ mod tests {
         let _ = std::fs::remove_file(second);
     }
 
+    /// TASK-260711-19 testcase: `coda` with no path arguments must not error
+    /// out — `run_editor` (src/app/mod.rs) forwards empty `paths` straight
+    /// through to `open_many`, which is exercised directly here since it
+    /// already owns the "no documents => push one unnamed buffer" fallback.
+    #[test]
+    fn open_many_with_empty_paths_opens_a_single_unnamed_buffer() {
+        let event_loop =
+            EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        assert_eq!(event_loop.documents.len(), 1);
+        assert_eq!(event_loop.active, 0);
+        assert_eq!(event_loop.documents[0].path, None);
+        assert_eq!(event_loop.active_document().display_name(), "[No Name]");
+        assert!(!event_loop.active_document().is_modified());
+    }
+
     #[test]
     fn buffer_next_and_previous_wrap_around() {
         let paths = [
@@ -1384,8 +1709,10 @@ mod tests {
         let _ = std::fs::remove_file(second);
     }
 
+    /// TASK-260712 Gate 1 testcase: `file.save` on an unnamed buffer now
+    /// opens the Save As prompt instead of just reporting an error message.
     #[test]
-    fn buffer_new_creates_unnamed_active_buffer_and_save_reports_save_as_missing() {
+    fn buffer_new_creates_unnamed_active_buffer_and_file_save_opens_save_as_prompt() {
         let path = temp_path("buffer-new-base");
         std::fs::write(&path, b"base").unwrap();
         let mut event_loop =
@@ -1398,7 +1725,138 @@ mod tests {
 
         event_loop.editor_mut().insert_text("draft");
         event_loop.dispatch(EditorAction::FileSave);
-        assert_eq!(event_loop.message, "save as: not implemented yet");
+        assert!(
+            event_loop.prompt.visible,
+            "unnamed-buffer save must open the Save As prompt"
+        );
+        assert_eq!(event_loop.prompt.purpose, Some(PromptPurpose::SaveAs));
+        assert!(
+            event_loop.prompt.input.is_empty(),
+            "no current path to prefill"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// TASK-260711-18: `view.toggleWrap` flips the editor-wide wrap flag,
+    /// reports the new state, and clears per-document wrap scroll state.
+    #[test]
+    fn toggle_wrap_flips_state_and_resets_top_segment() {
+        let path = temp_path("toggle-wrap");
+        std::fs::write(&path, b"text").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.set_wrap(true);
+        event_loop.documents[0].view.top_segment = 3;
+
+        event_loop.dispatch(EditorAction::ViewToggleWrap);
+        assert!(!event_loop.wrap);
+        assert_eq!(event_loop.message, "wrap: off");
+        assert_eq!(event_loop.documents[0].view.top_segment, 0);
+
+        event_loop.dispatch(EditorAction::ViewToggleWrap);
+        assert!(event_loop.wrap);
+        assert_eq!(event_loop.message, "wrap: on");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// TASK-260711-19 testcase: `config.openSettings`/`config.openKeybindings`
+    /// route through `open_config_document`, which is exercised directly here
+    /// (rather than through the real `HOME`-derived path) so the test stays
+    /// deterministic under parallel `cargo test` — same reasoning as the
+    /// `NO_COLOR` tests in `import_cli.rs`.
+    #[test]
+    fn open_config_document_inserts_template_only_for_a_new_file() {
+        let base = temp_path("open-config-base");
+        std::fs::write(&base, b"base").unwrap();
+        let mut event_loop =
+            EventLoop::open(base.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        let settings_path = temp_path("open-config-settings");
+        let _ = std::fs::remove_file(&settings_path);
+
+        event_loop.open_config_document(Some(settings_path.clone()), "template content\n");
+
+        assert_eq!(event_loop.documents.len(), 2);
+        assert_eq!(event_loop.active, 1);
+        assert_eq!(buffer_text(&event_loop), "template content\n");
+        assert!(
+            event_loop.active_document().is_modified(),
+            "template content is unsaved until the user explicitly saves"
+        );
+
+        let expected_name = event_loop.active_document().display_name();
+        event_loop.dispatch(EditorAction::FileSave);
+        assert_eq!(event_loop.message, format!("saved {expected_name}"));
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            "template content\n"
+        );
+
+        let _ = std::fs::remove_file(&base);
+        let _ = std::fs::remove_file(&settings_path);
+    }
+
+    #[test]
+    fn open_config_document_leaves_an_existing_files_content_untouched() {
+        let base = temp_path("open-config-existing-base");
+        std::fs::write(&base, b"base").unwrap();
+        let mut event_loop =
+            EventLoop::open(base.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        let existing_path = temp_path("open-config-existing");
+        std::fs::write(&existing_path, b"already customized\n").unwrap();
+
+        event_loop.open_config_document(Some(existing_path.clone()), "template content\n");
+
+        assert_eq!(buffer_text(&event_loop), "already customized\n");
+        assert!(
+            !event_loop.active_document().is_modified(),
+            "opening an existing file must not mark it modified"
+        );
+
+        let _ = std::fs::remove_file(&base);
+        let _ = std::fs::remove_file(&existing_path);
+    }
+
+    #[test]
+    fn open_config_document_without_home_reports_a_message_instead_of_panicking() {
+        let base = temp_path("open-config-no-home");
+        std::fs::write(&base, b"base").unwrap();
+        let mut event_loop =
+            EventLoop::open(base.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        event_loop.open_config_document(None, "template content\n");
+
+        assert_eq!(event_loop.documents.len(), 1, "no buffer must be opened");
+        assert_eq!(
+            event_loop.message,
+            "HOME is not set; cannot open config file"
+        );
+
+        let _ = std::fs::remove_file(&base);
+    }
+
+    /// TASK-260711-19 testcase: `edit.indent`/`edit.outdent` dispatch through
+    /// to `EditorCore`; the table-driven behavior itself is covered in
+    /// `core::editor`'s own tests, so this only checks the dispatch wiring.
+    #[test]
+    fn indent_and_outdent_actions_dispatch_to_the_editor() {
+        let path = temp_path("indent-outdent-dispatch");
+        std::fs::write(&path, b"foo\nbar").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        event_loop.editor_mut().select_range(
+            crate::core::position::Position::new(0, 0),
+            crate::core::position::Position::new(1, 3),
+        );
+        event_loop.dispatch(EditorAction::EditIndent);
+        assert_eq!(buffer_text(&event_loop), "    foo\n    bar");
+
+        event_loop.dispatch(EditorAction::EditOutdent);
+        assert_eq!(buffer_text(&event_loop), "foo\nbar");
 
         let _ = std::fs::remove_file(path);
     }
@@ -1675,5 +2133,260 @@ keybind = super+digit_1=goto_tab:1
         assert!(event_loop.capability_probe.is_some());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    /// TASK-260712 Gate 1 testcases: Save As (prompt + `file.saveAs`).
+
+    #[test]
+    fn file_save_as_prompt_submits_and_saves_to_a_new_path() {
+        let base = temp_path("save-as-base");
+        std::fs::write(&base, b"base").unwrap();
+        let target = temp_path("save-as-target");
+        let _ = std::fs::remove_file(&target);
+        let mut event_loop =
+            EventLoop::open(base.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        event_loop.editor_mut().insert_text("!");
+        event_loop.dispatch(EditorAction::FileSaveAs);
+        assert!(event_loop.prompt.visible);
+        assert_eq!(event_loop.prompt.purpose, Some(PromptPurpose::SaveAs));
+        assert_eq!(event_loop.prompt.input, base.display().to_string());
+
+        // Replace the prefilled current path with the target path.
+        for _ in 0..event_loop.prompt.input.chars().count() {
+            event_loop.handle_key(KeyEvent::plain(Key::Backspace));
+        }
+        for character in target.display().to_string().chars() {
+            event_loop.handle_key(KeyEvent::plain(Key::Char(character)));
+        }
+        assert_eq!(
+            event_loop.handle_key(KeyEvent::plain(Key::Enter)),
+            QuitDecision::Continue
+        );
+
+        assert!(!event_loop.prompt.visible);
+        assert_eq!(event_loop.active_document().path.as_ref(), Some(&target));
+        assert_eq!(
+            event_loop.active_document().display_name(),
+            target.file_name().unwrap().to_str().unwrap()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"!base");
+        assert!(
+            event_loop.message.starts_with("saved "),
+            "{}",
+            event_loop.message
+        );
+        assert!(!event_loop.active_document().is_modified());
+
+        let _ = std::fs::remove_file(&base);
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn file_save_as_to_an_existing_different_path_requires_a_second_enter_to_overwrite() {
+        let base = temp_path("save-as-overwrite-base");
+        std::fs::write(&base, b"base").unwrap();
+        let target = temp_path("save-as-overwrite-target");
+        std::fs::write(&target, b"target-original").unwrap();
+        let mut event_loop =
+            EventLoop::open(base.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.editor_mut().insert_text("!");
+
+        event_loop.dispatch(EditorAction::FileSaveAs);
+        for _ in 0..event_loop.prompt.input.chars().count() {
+            event_loop.handle_key(KeyEvent::plain(Key::Backspace));
+        }
+        for character in target.display().to_string().chars() {
+            event_loop.handle_key(KeyEvent::plain(Key::Char(character)));
+        }
+
+        event_loop.handle_key(KeyEvent::plain(Key::Enter));
+        assert_eq!(event_loop.message, "file exists; enter again to overwrite");
+        assert!(
+            event_loop.prompt.visible,
+            "prompt stays open for the confirmation"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"target-original");
+
+        event_loop.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(!event_loop.prompt.visible);
+        assert_eq!(std::fs::read(&target).unwrap(), b"!base");
+
+        let _ = std::fs::remove_file(&base);
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn file_save_as_esc_cancels_without_changing_the_document() {
+        let path = temp_path("save-as-cancel");
+        std::fs::write(&path, b"base").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        event_loop.dispatch(EditorAction::FileSaveAs);
+        assert!(event_loop.prompt.visible);
+
+        event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
+        assert_eq!(
+            event_loop.handle_key(KeyEvent::plain(Key::Esc)),
+            QuitDecision::Continue
+        );
+
+        assert!(!event_loop.prompt.visible);
+        assert_eq!(event_loop.active_document().path.as_ref(), Some(&path));
+        assert_eq!(event_loop.message, "save as: cancelled");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// TASK-260712 Gate 1 testcases: external-change detection (mtime).
+
+    #[test]
+    fn file_save_reports_conflict_on_external_change_and_second_save_forces_overwrite() {
+        let path = temp_path("save-conflict");
+        std::fs::write(&path, b"base").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        // Simulate an external editor having touched the file: pin the
+        // in-memory saved_mtime to a deliberately stale value instead of
+        // racing a real external writer against filesystem mtime
+        // resolution (same reasoning as document.rs's own conflict test).
+        event_loop.documents[0].saved_mtime = Some(SystemTime::UNIX_EPOCH);
+        event_loop.editor_mut().insert_text("!");
+
+        event_loop.dispatch(EditorAction::FileSave);
+        assert_eq!(
+            event_loop.message,
+            "file changed on disk; save again to overwrite"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"base",
+            "conflicting save must not write"
+        );
+
+        event_loop.dispatch(EditorAction::FileSave);
+        assert!(event_loop.message.starts_with("saved "));
+        assert_eq!(std::fs::read(&path).unwrap(), b"!base");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_save_conflict_guard_resets_when_another_action_is_dispatched() {
+        let path = temp_path("save-conflict-reset");
+        std::fs::write(&path, b"base").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        event_loop.documents[0].saved_mtime = Some(SystemTime::UNIX_EPOCH);
+        event_loop.editor_mut().insert_text("!");
+        event_loop.dispatch(EditorAction::FileSave);
+        assert_eq!(
+            event_loop.message,
+            "file changed on disk; save again to overwrite"
+        );
+
+        // Any other action interposed between the two save attempts must
+        // reset the guard, so the next save warns again instead of
+        // silently forcing an overwrite.
+        event_loop.dispatch(EditorAction::CursorRight);
+        event_loop.dispatch(EditorAction::FileSave);
+        assert_eq!(
+            event_loop.message,
+            "file changed on disk; save again to overwrite"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"base");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// TASK-260712 Gate 1 testcases: large file protection.
+
+    #[test]
+    fn large_file_over_threshold_opens_readonly_and_blocks_edits_and_save_but_allows_navigation() {
+        let path = temp_path("large-file-over");
+        std::fs::write(&path, vec![b'a'; (LARGE_FILE_BYTES + 1) as usize]).unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        assert!(event_loop.active_document().readonly);
+        assert!(event_loop.context().is_readonly);
+        assert!(
+            event_loop
+                .message
+                .contains("large file (>10 MB); opened read-only"),
+            "{}",
+            event_loop.message
+        );
+
+        let original_len = event_loop.editor().buffer.to_bytes().len();
+
+        // Literal insertion is blocked with a message, not a silent no-op.
+        event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
+        assert_eq!(event_loop.editor().buffer.to_bytes().len(), original_len);
+        assert_eq!(event_loop.message, "read-only buffer (large file)");
+
+        // A mutating action is blocked with the same message.
+        event_loop.dispatch(EditorAction::EditBackspace);
+        assert_eq!(event_loop.message, "read-only buffer (large file)");
+
+        // Save is blocked too.
+        event_loop.dispatch(EditorAction::FileSave);
+        assert_eq!(event_loop.message, "read-only buffer (large file)");
+
+        // Navigation, view.toggleWrap, and the palette still work.
+        assert_eq!(
+            event_loop.dispatch(EditorAction::CursorRight),
+            QuitDecision::Continue
+        );
+        event_loop.dispatch(EditorAction::ViewToggleWrap);
+        assert_eq!(event_loop.message, "wrap: on");
+        assert_eq!(
+            event_loop.dispatch(EditorAction::PaletteOpen),
+            QuitDecision::Continue
+        );
+        assert!(event_loop.palette.visible);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn large_file_at_exact_threshold_stays_editable() {
+        let path = temp_path("large-file-at-threshold");
+        std::fs::write(&path, vec![b'a'; LARGE_FILE_BYTES as usize]).unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        assert!(!event_loop.active_document().readonly);
+        assert!(!event_loop.context().is_readonly);
+
+        event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
+        assert!(
+            String::from_utf8(event_loop.editor().buffer.to_bytes())
+                .unwrap()
+                .starts_with('x'),
+            "editing must succeed at exactly the threshold"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Confirms the readonly gate operates at the dispatch layer, not by
+    /// relying on the default binding table to reference `isReadonly`:
+    /// `alt+z` (editorFocus-gated, no readonly clause) must still resolve
+    /// while `is_readonly` is set.
+    #[test]
+    fn is_readonly_context_still_resolves_editor_focus_bindings_like_wrap_toggle() {
+        let resolver = Resolver::new(bindings_for(Platform::MacOs));
+        let context = EditorContext {
+            is_readonly: true,
+            ..EditorContext::default()
+        };
+        assert_eq!(
+            resolver.resolve(&["alt+z".parse().unwrap()], &context),
+            ResolveResult::Matched(EditorAction::ViewToggleWrap)
+        );
     }
 }

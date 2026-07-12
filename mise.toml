@@ -3,11 +3,25 @@
 
 [tools]
 rust = "stable"
+# release 用 toolchain。goreleaser が compile〜checksum を担い、
+# Linux (gnu) target の cross link に zig + cargo-zigbuild を使う (.goreleaser.yaml 参照)。
+# release script 本体は cargo xtask (xtask/) に移植済み。専用の script runtime は不要
+goreleaser = "2"
+zig = "0.14"
+"ubi:rust-cross/cargo-zigbuild" = "latest"
 
 [tasks.pre-commit]
 description = "pre-commit: format, lint and test Rust code"
 run = [
   "cargo fmt --check",
-  "cargo clippy -- -D warnings",
-  "cargo test",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo test --workspace",
 ]
+
+[tasks."release:prepare"]
+description = "Bump Cargo.toml version, run checks/tests, and dry-run the goreleaser pipeline (no publish)"
+run = "cargo xtask prepare"
+
+[tasks."release:publish"]
+description = "Push the tagged commit and create the GitHub Release via goreleaser (human-only; agents must not run this)"
+run = "cargo xtask publish"

@@ -1,0 +1,4 @@
+# `cargo xtask <prepare|publish> <version>` で xtask crate を起動する alias。
+# --quiet は cargo 自身のビルドログを黙らせるため (xtask 側の出力とは無関係)
+[alias]
+xtask = "run --quiet -p xtask --"

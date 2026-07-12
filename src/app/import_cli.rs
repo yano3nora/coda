@@ -37,21 +37,38 @@ pub struct ImportOutput {
 
 pub fn run_vscode_import(options: &ImportOptions) -> Result<ImportOutput, String> {
     let base_dir = config_base_dir().ok_or_else(|| "HOME is not set".to_string())?;
-    // isatty/NO_COLOR is decided once here (not inside `run_vscode_import_in_base`)
-    // so the base function stays a pure style-in/text-out unit under test
-    // (TASK-260712-18 design).
+    // Everything that reads the environment (isatty/NO_COLOR, the stdin
+    // capability probe) is decided once here, not inside
+    // `run_vscode_import_in_base`, so the base function stays a pure
+    // inputs-in/text-out unit under test (TASK-260712-18 design; the probe
+    // moved out after the tests proved TTY-dependent when `cargo test` runs
+    // in an interactive terminal).
     let stdout_style = if stdout_supports_color() {
         ReportStyle::ansi()
     } else {
         ReportStyle::plain()
     };
-    run_vscode_import_in_base(options, &base_dir, &stdout_style)
+    // Detect once per invocation (TASK-260712-16): a piped/CI stdin cannot
+    // answer an escape-sequence query at all, so `probe_blocking` assumes
+    // modern there rather than spending the full timeout discovering nothing
+    // and then silently disabling every super/shift-enter/ctrl-enter binding
+    // on every non-interactive run.
+    let detection = probe_blocking(CAPABILITY_PROBE_TIMEOUT);
+    run_vscode_import_in_base(options, &base_dir, &stdout_style, detection)
 }
 
 /// Whether stdout should be colorized: stdout must be a real terminal (not a
 /// pipe/redirect) and the `NO_COLOR` convention must not opt out.
 fn stdout_supports_color() -> bool {
-    stdout_is_tty() && no_color_env_allows_color()
+    supports_color(stdout_is_tty(), env::var_os("NO_COLOR").as_deref())
+}
+
+/// Pure composition of the two color gates, split out so the truth table is
+/// testable without controlling what `cargo test`'s stdout actually is (it
+/// IS a TTY when run from an interactive terminal — libtest captures output
+/// in-process without replacing fd 1).
+fn supports_color(is_tty: bool, no_color: Option<&std::ffi::OsStr>) -> bool {
+    is_tty && no_color_allows_color(no_color)
 }
 
 /// Mirrors the `libc::isatty` precedent in `src/input/capabilities.rs`, but
@@ -59,10 +76,6 @@ fn stdout_supports_color() -> bool {
 /// is irrelevant to whether stdout is colorized).
 fn stdout_is_tty() -> bool {
     unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
-}
-
-fn no_color_env_allows_color() -> bool {
-    no_color_allows_color(env::var_os("NO_COLOR").as_deref())
 }
 
 /// NO_COLOR convention (https://no-color.org/): color is disabled only when
@@ -81,16 +94,11 @@ pub(crate) fn run_vscode_import_in_base(
     options: &ImportOptions,
     base_dir: &Path,
     stdout_style: &ReportStyle,
+    detection: CapabilityDetection,
 ) -> Result<ImportOutput, String> {
     let input = fs::read_to_string(&options.path)
         .map_err(|error| format!("{}: {error}", options.path.display()))?;
 
-    // Detect once per invocation (TASK-260712-16): a piped/CI stdin cannot
-    // answer an escape-sequence query at all, so `probe_blocking` assumes
-    // modern there rather than spending the full timeout discovering nothing
-    // and then silently disabling every super/shift-enter/ctrl-enter binding
-    // on every non-interactive run.
-    let detection = probe_blocking(CAPABILITY_PROBE_TIMEOUT);
     let capabilities = detection.capabilities();
     let imported =
         import_vscode_keybindings(&input, &capabilities).map_err(|error| match error {
@@ -181,9 +189,8 @@ fn write_parented(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ImportOptions, no_color_allows_color, run_vscode_import_in_base, stdout_supports_color,
-    };
+    use super::{ImportOptions, no_color_allows_color, run_vscode_import_in_base, supports_color};
+    use crate::input::CapabilityDetection;
     use crate::keymap::ReportStyle;
     use std::fs;
 
@@ -207,6 +214,7 @@ mod tests {
             },
             &temp.join("config"),
             &ReportStyle::plain(),
+            CapabilityDetection::AssumedModern,
         )
         .unwrap();
 
@@ -245,6 +253,7 @@ mod tests {
             },
             &temp.join("config"),
             &ReportStyle::plain(),
+            CapabilityDetection::AssumedModern,
         )
         .unwrap();
 
@@ -277,6 +286,7 @@ mod tests {
             },
             &temp.join("config"),
             &ReportStyle::plain(),
+            CapabilityDetection::AssumedModern,
         )
         .unwrap();
 
@@ -336,6 +346,7 @@ mod tests {
             },
             &temp.join("config"),
             &ReportStyle::plain(),
+            CapabilityDetection::AssumedModern,
         )
         .unwrap();
 
@@ -376,6 +387,7 @@ mod tests {
             },
             &base,
             &ReportStyle::plain(),
+            CapabilityDetection::AssumedModern,
         )
         .unwrap();
 
@@ -384,10 +396,10 @@ mod tests {
         fs::remove_dir_all(&temp).unwrap();
     }
 
-    /// TASK-260712-16: the CLI's stdin under `cargo test` is not a TTY, so
-    /// `probe_blocking` takes the fast `AssumedModern` path — this asserts
-    /// the exact wording that path produces shows up at the top of both
-    /// stdout and the written report file, without needing a real terminal.
+    /// TASK-260712-16: with an injected `AssumedModern` detection (no real
+    /// probe — relying on `cargo test`'s stdin being a non-TTY proved false
+    /// in interactive terminals), the wording that path produces must show
+    /// up at the top of both stdout and the written report file.
     #[test]
     fn stdout_and_report_file_lead_with_the_terminal_capability_line() {
         let temp = std::env::temp_dir().join(format!(
@@ -412,6 +424,7 @@ mod tests {
             },
             &base,
             &ReportStyle::plain(),
+            CapabilityDetection::AssumedModern,
         )
         .unwrap();
 
@@ -451,15 +464,23 @@ mod tests {
         );
     }
 
-    /// TASK-260712-18 testcase: color-disabled (plain style) CLI stdout must
-    /// never contain an escape byte. `cargo test`'s stdout is not a TTY
-    /// (same assumption the capability-line test above already relies on),
-    /// so `stdout_supports_color()` is deterministically false here too.
+    /// TASK-260712-18 testcase: the tty × NO_COLOR truth table, exercised on
+    /// the pure `supports_color` helper. Asserting on the real
+    /// `stdout_supports_color()` is impossible here: whether `cargo test`'s
+    /// stdout is a TTY depends on how the tests were invoked (interactive
+    /// terminal vs. pipe/CI), so any fixed expectation is flaky.
     #[test]
-    fn stdout_supports_color_is_false_under_cargo_test() {
+    fn supports_color_requires_a_tty_and_no_color_opt_in() {
+        use std::ffi::OsStr;
+
+        assert!(supports_color(true, None), "tty without NO_COLOR colors");
         assert!(
-            !stdout_supports_color(),
-            "cargo test's stdout is not an interactive terminal"
+            !supports_color(false, None),
+            "a pipe/redirect never colors, even without NO_COLOR"
+        );
+        assert!(
+            !supports_color(true, Some(OsStr::new("1"))),
+            "NO_COLOR=1 wins over a tty"
         );
     }
 
@@ -487,6 +508,7 @@ mod tests {
             },
             &temp.join("config"),
             &ReportStyle::ansi(),
+            CapabilityDetection::AssumedModern,
         )
         .unwrap();
 

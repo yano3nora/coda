@@ -265,6 +265,25 @@ const COMMON: &[RawBinding] = &[
         Some("textInputFocus"),
         Source::Default,
     ),
+    // Tab/Shift+Tab (TASK-260711-19): selection-less Tab keeps inserting a
+    // literal tab character, handled directly by the event loop's text-input
+    // path rather than through a binding — so it deliberately has no default
+    // entry here. Shift+Tab always outdents regardless of selection (VS Code
+    // parity); CSI Z decodes to this same Tab+Shift chord (see
+    // `input::decoder`), so nothing extra is needed to support the
+    // dedicated back-tab escape sequence.
+    (
+        "tab",
+        EditorAction::EditIndent,
+        Some("textInputFocus && hasSelection"),
+        Source::Default,
+    ),
+    (
+        "shift+tab",
+        EditorAction::EditOutdent,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
     (
         "alt+up",
         EditorAction::EditMoveLinesUp,
@@ -275,6 +294,14 @@ const COMMON: &[RawBinding] = &[
         "alt+down",
         EditorAction::EditMoveLinesDown,
         Some("textInputFocus"),
+        Source::Default,
+    ),
+    // VS Code parity: editor.action.toggleWordWrap. Display-only, so it is
+    // gated on editorFocus (not textInputFocus) and works in readonly buffers.
+    (
+        "alt+z",
+        EditorAction::ViewToggleWrap,
+        Some("editorFocus"),
         Source::Default,
     ),
     (
@@ -569,6 +596,65 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    /// TASK-260711-19 testcase: `tab` only resolves to `edit.indent` when a
+    /// selection is active (selection-less Tab must stay unbound so the
+    /// event loop's literal-tab-insertion path still runs); `shift+tab`
+    /// resolves to `edit.outdent` unconditionally.
+    #[test]
+    fn tab_default_bindings_respect_selection_and_shift_tab_always_outdents() {
+        let resolver = Resolver::new(bindings());
+        let text_context = EditorContext {
+            text_input_focus: true,
+            ..EditorContext::default()
+        };
+        let selection_context = EditorContext {
+            text_input_focus: true,
+            has_selection: true,
+            ..EditorContext::default()
+        };
+
+        assert_eq!(
+            resolver.resolve(&["tab".parse().unwrap()], &text_context),
+            ResolveResult::NoMatch,
+            "tab without a selection must stay unbound"
+        );
+        assert_eq!(
+            resolver.resolve(&["tab".parse().unwrap()], &selection_context),
+            ResolveResult::Matched(EditorAction::EditIndent)
+        );
+        assert_eq!(
+            resolver.resolve(&["shift+tab".parse().unwrap()], &text_context),
+            ResolveResult::Matched(EditorAction::EditOutdent),
+            "shift+tab must outdent even without a selection"
+        );
+        assert_eq!(
+            resolver.resolve(&["shift+tab".parse().unwrap()], &selection_context),
+            ResolveResult::Matched(EditorAction::EditOutdent)
+        );
+    }
+
+    /// TASK-260711-19 testcase: the dedicated back-tab escape sequence (`CSI
+    /// Z`, which `input::decoder` normalizes to Tab+Shift) must resolve to
+    /// `edit.outdent` end-to-end, not just the synthetic `"shift+tab"` key
+    /// string used by the test above.
+    #[test]
+    fn csi_z_decodes_to_shift_tab_and_resolves_to_outdent() {
+        use crate::input::drain_key_events;
+
+        let mut buffer = b"\x1b[Z".to_vec();
+        let events = drain_key_events(&mut buffer);
+
+        let resolver = Resolver::new(bindings());
+        let context = EditorContext {
+            text_input_focus: true,
+            ..EditorContext::default()
+        };
+        assert_eq!(
+            resolver.resolve(&events, &context),
+            ResolveResult::Matched(EditorAction::EditOutdent)
+        );
     }
 
     #[test]

@@ -9,8 +9,9 @@ use crate::{
     ui::{Screen, Style},
 };
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum SearchFocus {
+    #[default]
     Search,
     Replace,
 }
@@ -25,12 +26,6 @@ pub struct SearchOverlay {
     pub focus: SearchFocus,
     pub current: Option<usize>,
     matches: Vec<(Position, Position)>,
-}
-
-impl Default for SearchFocus {
-    fn default() -> Self {
-        Self::Search
-    }
 }
 
 impl SearchOverlay {

@@ -41,6 +41,8 @@ pub enum EditorAction {
     EditInsertLineBefore,
     EditMoveLinesUp,
     EditMoveLinesDown,
+    EditIndent,
+    EditOutdent,
     EditCopy,
     EditCut,
     EditPaste,
@@ -61,9 +63,12 @@ pub enum EditorAction {
     ViewSplitVertical,
     ViewFocusNextSplit,
     ViewFocusPreviousSplit,
+    ViewToggleWrap,
     PaletteOpen,
     AppQuit,
     InspectorOpen,
+    ConfigOpenSettings,
+    ConfigOpenKeybindings,
 }
 
 impl EditorAction {
@@ -102,6 +107,8 @@ impl EditorAction {
         Self::EditInsertLineBefore,
         Self::EditMoveLinesUp,
         Self::EditMoveLinesDown,
+        Self::EditIndent,
+        Self::EditOutdent,
         Self::EditCopy,
         Self::EditCut,
         Self::EditPaste,
@@ -122,9 +129,12 @@ impl EditorAction {
         Self::ViewSplitVertical,
         Self::ViewFocusNextSplit,
         Self::ViewFocusPreviousSplit,
+        Self::ViewToggleWrap,
         Self::PaletteOpen,
         Self::AppQuit,
         Self::InspectorOpen,
+        Self::ConfigOpenSettings,
+        Self::ConfigOpenKeybindings,
     ];
 
     /// Canonical action name used in bindings and import reports.
@@ -163,6 +173,8 @@ impl EditorAction {
             Self::EditInsertLineBefore => "edit.insertLineBefore",
             Self::EditMoveLinesUp => "edit.moveLinesUp",
             Self::EditMoveLinesDown => "edit.moveLinesDown",
+            Self::EditIndent => "edit.indent",
+            Self::EditOutdent => "edit.outdent",
             Self::EditCopy => "edit.copy",
             Self::EditCut => "edit.cut",
             Self::EditPaste => "edit.paste",
@@ -183,9 +195,12 @@ impl EditorAction {
             Self::ViewSplitVertical => "view.splitVertical",
             Self::ViewFocusNextSplit => "view.focusNextSplit",
             Self::ViewFocusPreviousSplit => "view.focusPreviousSplit",
+            Self::ViewToggleWrap => "view.toggleWrap",
             Self::PaletteOpen => "palette.open",
             Self::AppQuit => "app.quit",
             Self::InspectorOpen => "inspector.open",
+            Self::ConfigOpenSettings => "config.openSettings",
+            Self::ConfigOpenKeybindings => "config.openKeybindings",
         }
     }
 }
@@ -240,6 +255,8 @@ impl FromStr for EditorAction {
             "edit.insertLineBefore" => Ok(Self::EditInsertLineBefore),
             "edit.moveLinesUp" => Ok(Self::EditMoveLinesUp),
             "edit.moveLinesDown" => Ok(Self::EditMoveLinesDown),
+            "edit.indent" => Ok(Self::EditIndent),
+            "edit.outdent" => Ok(Self::EditOutdent),
             "edit.copy" => Ok(Self::EditCopy),
             "edit.cut" => Ok(Self::EditCut),
             "edit.paste" => Ok(Self::EditPaste),
@@ -260,9 +277,12 @@ impl FromStr for EditorAction {
             "view.splitVertical" => Ok(Self::ViewSplitVertical),
             "view.focusNextSplit" => Ok(Self::ViewFocusNextSplit),
             "view.focusPreviousSplit" => Ok(Self::ViewFocusPreviousSplit),
+            "view.toggleWrap" => Ok(Self::ViewToggleWrap),
             "palette.open" => Ok(Self::PaletteOpen),
             "app.quit" => Ok(Self::AppQuit),
             "inspector.open" => Ok(Self::InspectorOpen),
+            "config.openSettings" => Ok(Self::ConfigOpenSettings),
+            "config.openKeybindings" => Ok(Self::ConfigOpenKeybindings),
             _ => Err(ParseActionError(value.to_string())),
         }
     }
@@ -271,5 +291,45 @@ impl FromStr for EditorAction {
 impl fmt::Display for EditorAction {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EditorAction;
+    use std::str::FromStr;
+
+    /// Every entry in `ALL` must round-trip through `as_str` / `FromStr`, so
+    /// a typo in either table (or a forgotten `ALL` entry) fails loudly
+    /// instead of silently dropping the action from the palette / import
+    /// mapping (TASK-260711-19: this caught the initial `config.openSettings`
+    /// / `edit.indent` additions before they shipped).
+    #[test]
+    fn every_action_round_trips_through_as_str_and_from_str() {
+        for action in EditorAction::ALL {
+            let name = action.as_str();
+            assert_eq!(
+                EditorAction::from_str(name),
+                Ok(*action),
+                "round-trip failed for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_small_ux_gap_actions_use_dotted_names() {
+        let cases = [
+            (EditorAction::EditIndent, "edit.indent"),
+            (EditorAction::EditOutdent, "edit.outdent"),
+            (EditorAction::ConfigOpenSettings, "config.openSettings"),
+            (
+                EditorAction::ConfigOpenKeybindings,
+                "config.openKeybindings",
+            ),
+        ];
+        for (action, name) in cases {
+            assert_eq!(action.as_str(), name);
+            assert_eq!(EditorAction::from_str(name), Ok(action));
+        }
     }
 }
