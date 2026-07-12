@@ -119,6 +119,7 @@ keybind = super+c=performable:copy_to_clipboard   # pass through to coda only wh
 
 - Tradeoff: the shell (zsh etc.) also loses the `Cmd+←` line-start translation
 - Use `coda inspect-key` to diagnose which keys actually arrive
+- Fuller worked example — undo/redo, `Cmd+↑/↓`, and the `Cmd+H`-vs-Hide special case: [docs/examples/ghostty.md](docs/examples/ghostty.md)
 
 ### Configuration
 
