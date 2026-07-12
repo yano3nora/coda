@@ -144,19 +144,29 @@ import 後、必ず report を出力し、以下へ保存する。
 ```text
 VS Code keybinding import completed.
 
-Imported: 24
-Ignored: 38
-Unsupported commands: 5
-Unsupported conditions: 3
-Conflicts: 2
+Imported: 2
+Ignored: 1
+Unsupported commands: 1
+Unsupported conditions: 0
+Invalid keys: 0
+Conflicts: 0
 Disabled by terminal capability: 1
 
-Examples:
-- Imported Ctrl+j -> cursor.down [editorFocus]
-- Ignored cmd+t -> terminal.newInActiveWorkspace [outside editor scope]
-- Unsupported ctrl+r -> editor.action.rename [feature not implemented]
-- Disabled Ctrl+Shift+j -> selection.down [terminal cannot distinguish Ctrl+Shift+j]
+Imported (2):
+- Ctrl+j -> cursor.down [editorFocus] [imported]
+- Ctrl+k -> cursor.up [editorFocus] [imported]
+
+Ignored (1):
+- cmd+t -> terminal.newInActiveWorkspace [outside editor scope]
+
+Unsupported commands (1):
+- Ctrl+r -> editor.action.rename [feature not implemented]
+
+Disabled by terminal capability (1):
+- Ctrl+Shift+j -> selection.down [terminal cannot distinguish Ctrl+Shift+j]
 ```
+
+report は「対象の全 entry がいずれかの分類に必ず現れる」という Invariant を満たすため、件数が0の分類はセクション自体を省略しつつ、件数が1以上の分類は全 entry を列挙する(先頭1件だけの "Examples:" 表示は廃止)。
 
 ### Output
 

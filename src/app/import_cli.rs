@@ -11,7 +11,9 @@ use std::{
 
 use crate::{
     input::{CapabilityDetection, probe_blocking},
-    keymap::{VsCodeImportError, import_vscode_keybindings, render_generated_bindings},
+    keymap::{
+        ReportStyle, VsCodeImportError, import_vscode_keybindings, render_generated_bindings,
+    },
 };
 
 /// How long the CLI blocks a TTY stdin for a capability-query reply before
@@ -35,12 +37,50 @@ pub struct ImportOutput {
 
 pub fn run_vscode_import(options: &ImportOptions) -> Result<ImportOutput, String> {
     let base_dir = config_base_dir().ok_or_else(|| "HOME is not set".to_string())?;
-    run_vscode_import_in_base(options, &base_dir)
+    // isatty/NO_COLOR is decided once here (not inside `run_vscode_import_in_base`)
+    // so the base function stays a pure style-in/text-out unit under test
+    // (TASK-260712-18 design).
+    let stdout_style = if stdout_supports_color() {
+        ReportStyle::ansi()
+    } else {
+        ReportStyle::plain()
+    };
+    run_vscode_import_in_base(options, &base_dir, &stdout_style)
+}
+
+/// Whether stdout should be colorized: stdout must be a real terminal (not a
+/// pipe/redirect) and the `NO_COLOR` convention must not opt out.
+fn stdout_supports_color() -> bool {
+    stdout_is_tty() && no_color_env_allows_color()
+}
+
+/// Mirrors the `libc::isatty` precedent in `src/input/capabilities.rs`, but
+/// checks stdout specifically (the report is printed there; stdin's TTY-ness
+/// is irrelevant to whether stdout is colorized).
+fn stdout_is_tty() -> bool {
+    unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
+}
+
+fn no_color_env_allows_color() -> bool {
+    no_color_allows_color(env::var_os("NO_COLOR").as_deref())
+}
+
+/// NO_COLOR convention (https://no-color.org/): color is disabled only when
+/// the variable is *present and non-empty* — `NO_COLOR=` (set but empty)
+/// must NOT disable color. Takes the raw value rather than reading the env
+/// itself so tests can exercise all three states without mutating global
+/// process env (which is flaky under parallel `cargo test`).
+fn no_color_allows_color(no_color: Option<&std::ffi::OsStr>) -> bool {
+    match no_color {
+        None => true,
+        Some(value) => value.is_empty(),
+    }
 }
 
 pub(crate) fn run_vscode_import_in_base(
     options: &ImportOptions,
     base_dir: &Path,
+    stdout_style: &ReportStyle,
 ) -> Result<ImportOutput, String> {
     let input = fs::read_to_string(&options.path)
         .map_err(|error| format!("{}: {error}", options.path.display()))?;
@@ -82,20 +122,22 @@ pub(crate) fn run_vscode_import_in_base(
             .map_err(|error| format!("{}: {error}", report_path.display()))?;
     }
 
-    let summary = imported.report.summary();
-    let mut stdout = format!(
-        "{capability_line}\nVS Code keybinding import completed.\nImported: {}\nIgnored: {}\nUnsupported commands: {}\nUnsupported conditions: {}\nInvalid keys: {}\nConflicts: {}\nDisabled by terminal capability: {}\n",
-        summary.imported,
-        summary.ignored,
-        summary.unsupported_commands,
-        summary.unsupported_conditions,
-        summary.invalid_keys,
-        summary.conflicts,
-        summary.disabled_by_terminal_capability
-    );
+    // `--print-report` prints the full report (which already embeds the
+    // summary block), so the default path must not render the summary a
+    // second time via a hand-built string — both share
+    // `ImportReport::render_summary()` (TASK-260712-17). stdout uses
+    // `stdout_style` (ANSI or plain, decided by the caller); the saved file
+    // above always uses the plain `report_body` regardless (TASK-260712-18:
+    // the file on disk must never contain escape codes).
+    let mut stdout = format!("{capability_line}\n");
     if options.print_report {
+        stdout.push_str(&imported.report.render_text_with(stdout_style));
+    } else {
+        stdout.push_str(&imported.report.render_summary_with(stdout_style));
         stdout.push('\n');
-        stdout.push_str(&report_body);
+    }
+    if !options.dry_run {
+        stdout.push_str(&format!("\nReport saved to: {}\n", report_path.display()));
     }
 
     Ok(ImportOutput {
@@ -139,7 +181,10 @@ fn write_parented(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ImportOptions, run_vscode_import_in_base};
+    use super::{
+        ImportOptions, no_color_allows_color, run_vscode_import_in_base, stdout_supports_color,
+    };
+    use crate::keymap::ReportStyle;
     use std::fs;
 
     #[test]
@@ -161,12 +206,151 @@ mod tests {
                 print_report: false,
             },
             &temp.join("config"),
+            &ReportStyle::plain(),
         )
         .unwrap();
 
         assert!(output.stdout.contains("Imported: 1"));
+        assert!(
+            !output.stdout.contains("Report saved to:"),
+            "{}",
+            output.stdout
+        );
         assert!(!output.generated_path.exists());
         assert!(!output.report_path.exists());
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// TASK-260712-17 testcase: non-dry-run stdout must tell the user where
+    /// the report landed, since `render_summary()` alone never mentions a
+    /// path.
+    #[test]
+    fn non_dry_run_stdout_reports_the_saved_report_path() {
+        let temp =
+            std::env::temp_dir().join(format!("coda-import-saved-path-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let input_path = temp.join("keybindings.json");
+        fs::write(
+            &input_path,
+            r#"[{ "key": "ctrl+j", "command": "cursorDown", "when": "editorFocus" }]"#,
+        )
+        .unwrap();
+
+        let output = run_vscode_import_in_base(
+            &ImportOptions {
+                path: input_path,
+                dry_run: false,
+                print_report: false,
+            },
+            &temp.join("config"),
+            &ReportStyle::plain(),
+        )
+        .unwrap();
+
+        let expected_line = format!("Report saved to: {}", output.report_path.display());
+        assert!(output.stdout.contains(&expected_line), "{}", output.stdout);
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// TASK-260712-17 testcase: `--print-report` must not print the summary
+    /// (`Imported:` line) twice — once from a hand-built CLI string and once
+    /// from `render_text()`.
+    #[test]
+    fn print_report_stdout_contains_summary_exactly_once() {
+        let temp =
+            std::env::temp_dir().join(format!("coda-import-print-report-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let input_path = temp.join("keybindings.json");
+        fs::write(
+            &input_path,
+            r#"[{ "key": "ctrl+j", "command": "cursorDown", "when": "editorFocus" }]"#,
+        )
+        .unwrap();
+
+        let output = run_vscode_import_in_base(
+            &ImportOptions {
+                path: input_path,
+                dry_run: false,
+                print_report: true,
+            },
+            &temp.join("config"),
+            &ReportStyle::plain(),
+        )
+        .unwrap();
+
+        let occurrences = output.stdout.matches("Imported: 1").count();
+        assert_eq!(occurrences, 1, "{}", output.stdout);
+        assert!(
+            output.stdout.contains(&format!(
+                "Report saved to: {}",
+                output.report_path.display()
+            )),
+            "{}",
+            output.stdout
+        );
+        // Full listing must also be present exactly once, not just the summary count line.
+        assert_eq!(
+            output.stdout.matches("Imported (1):").count(),
+            1,
+            "{}",
+            output.stdout
+        );
+        // TASK-260712-18 testcase: `ReportStyle::plain()` stdout must never
+        // contain an escape byte.
+        assert!(
+            !output.stdout.contains('\u{1b}'),
+            "plain style must not emit ANSI escapes: {}",
+            output.stdout
+        );
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// TASK-260712-17 testcase: the saved `latest-vscode-import.txt` must
+    /// contain every entry of a multi-entry bucket, not just a sampled one.
+    #[test]
+    fn saved_report_file_contains_every_entry_of_a_bucket() {
+        let temp = std::env::temp_dir().join(format!(
+            "coda-import-saved-full-listing-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let input_path = temp.join("keybindings.json");
+        fs::write(
+            &input_path,
+            r#"[
+                { "key": "cmd+t", "command": "workbench.action.terminal.new" },
+                { "key": "cmd+p", "command": "workbench.action.quickOpen" },
+                { "key": "cmd+shift+e", "command": "workbench.view.explorer" }
+            ]"#,
+        )
+        .unwrap();
+
+        let output = run_vscode_import_in_base(
+            &ImportOptions {
+                path: input_path,
+                dry_run: false,
+                print_report: false,
+            },
+            &temp.join("config"),
+            &ReportStyle::plain(),
+        )
+        .unwrap();
+
+        let report = fs::read_to_string(&output.report_path).unwrap();
+        assert!(report.contains("Ignored (3):"), "{report}");
+        for expected in [
+            "workbench.action.terminal.new",
+            "workbench.action.quickOpen",
+            "workbench.view.explorer",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing `{expected}` in\n{report}"
+            );
+        }
         fs::remove_dir_all(&temp).unwrap();
     }
 
@@ -191,6 +375,7 @@ mod tests {
                 print_report: false,
             },
             &base,
+            &ReportStyle::plain(),
         )
         .unwrap();
 
@@ -226,6 +411,7 @@ mod tests {
                 print_report: false,
             },
             &base,
+            &ReportStyle::plain(),
         )
         .unwrap();
 
@@ -243,6 +429,77 @@ mod tests {
             "{report}"
         );
 
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// TASK-260712-18 testcase: `NO_COLOR` is only an opt-out when *present
+    /// and non-empty* (https://no-color.org/) — `NO_COLOR=` (set but empty)
+    /// must not disable color. Exercised via the pure helper (not real env
+    /// vars) so this is deterministic under parallel test execution.
+    #[test]
+    fn no_color_convention_only_disables_color_when_set_and_non_empty() {
+        use std::ffi::OsStr;
+
+        assert!(no_color_allows_color(None), "unset must allow color");
+        assert!(
+            !no_color_allows_color(Some(OsStr::new("1"))),
+            "NO_COLOR=1 must disable color"
+        );
+        assert!(
+            no_color_allows_color(Some(OsStr::new(""))),
+            "NO_COLOR= (empty) must not disable color"
+        );
+    }
+
+    /// TASK-260712-18 testcase: color-disabled (plain style) CLI stdout must
+    /// never contain an escape byte. `cargo test`'s stdout is not a TTY
+    /// (same assumption the capability-line test above already relies on),
+    /// so `stdout_supports_color()` is deterministically false here too.
+    #[test]
+    fn stdout_supports_color_is_false_under_cargo_test() {
+        assert!(
+            !stdout_supports_color(),
+            "cargo test's stdout is not an interactive terminal"
+        );
+    }
+
+    /// TASK-260712-18 testcase: color-enabled stdout must contain SGR escape
+    /// sequences, but the file written to disk must always stay plain even
+    /// when the caller asks for `ReportStyle::ansi()` stdout.
+    #[test]
+    fn ansi_style_colors_stdout_but_saved_report_file_stays_plain() {
+        let temp =
+            std::env::temp_dir().join(format!("coda-import-ansi-stdout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let input_path = temp.join("keybindings.json");
+        fs::write(
+            &input_path,
+            r#"[{ "key": "ctrl+j", "command": "cursorDown", "when": "editorFocus" }]"#,
+        )
+        .unwrap();
+
+        let output = run_vscode_import_in_base(
+            &ImportOptions {
+                path: input_path,
+                dry_run: false,
+                print_report: true,
+            },
+            &temp.join("config"),
+            &ReportStyle::ansi(),
+        )
+        .unwrap();
+
+        assert!(
+            output.stdout.contains('\u{1b}'),
+            "ansi style must emit an escape byte: {}",
+            output.stdout
+        );
+        let report = fs::read_to_string(&output.report_path).unwrap();
+        assert!(
+            !report.contains('\u{1b}'),
+            "saved report file must always stay plain: {report}"
+        );
         fs::remove_dir_all(&temp).unwrap();
     }
 }

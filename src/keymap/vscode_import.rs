@@ -88,6 +88,19 @@ fn classify_entry(
         return;
     };
 
+    // VS Code の "command": "" は default binding の打ち消し (unbind) 記法。
+    // coda 側に打ち消す対象の default はないため、機能未実装ではなく
+    // 意図的な無効化として ignored に分類する (-command と同族の扱い)。
+    if command_text.is_empty() {
+        report.ignored.push(ReportEntry::new(
+            key,
+            command,
+            when,
+            "empty command unbinds a VS Code default; not applicable in MVP",
+        ));
+        return;
+    }
+
     if command_text.starts_with('-') {
         report.unsupported_commands.push(ReportEntry::new(
             key,
@@ -397,7 +410,30 @@ mod tests {
     }
 
     #[test]
-    fn report_render_contains_counts_and_examples() {
+    fn empty_command_is_classified_as_ignored_unbind_not_unsupported() {
+        let fixture = r#"[
+            { "key": "cmd+shift+i", "command": "" },
+            { "key": "cmd+ctrl+i", "command": "" }
+        ]"#;
+
+        let imported = import_vscode_keybindings(fixture, &KeyboardCapabilities::modern()).unwrap();
+        let summary = imported.report.summary();
+
+        assert_eq!(summary.ignored, 2);
+        assert_eq!(summary.unsupported_commands, 0);
+        assert!(
+            imported
+                .report
+                .ignored
+                .iter()
+                .all(|entry| entry.reason.contains("unbind")),
+            "{:?}",
+            imported.report.ignored
+        );
+    }
+
+    #[test]
+    fn report_render_contains_counts_and_full_entry_listing() {
         let imported = import_vscode_keybindings(
             r#"[
                 { "key": "ctrl+j", "command": "cursorDown", "when": "editorFocus" },
@@ -420,12 +456,54 @@ mod tests {
             "Invalid keys: 1",
             "Conflicts: 0",
             "Disabled by terminal capability: 0",
-            "Examples:",
-            "- Imported ctrl+j -> cursor.down [editorFocus] [imported]",
-            "- Ignored cmd+t -> workbench.action.terminal.new [outside editor scope]",
-            "- Unsupported command f2 -> editor.action.rename [feature not implemented]",
-            "- Unsupported condition ctrl+m -> cursorDown [resourceLangId == markdown]",
-            "- Invalid key ctrl+[IntlBackslash] -> cursorDown",
+            "Imported (1):",
+            "- ctrl+j -> cursor.down [editorFocus] [imported]",
+            "Ignored (1):",
+            "- cmd+t -> workbench.action.terminal.new [outside editor scope]",
+            "Unsupported commands (1):",
+            "- f2 -> editor.action.rename [feature not implemented]",
+            "Unsupported conditions (1):",
+            "- ctrl+m -> cursorDown [resourceLangId == markdown]",
+            "Invalid keys (1):",
+            "- ctrl+[IntlBackslash] -> cursorDown",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing `{expected}` in\n{report}"
+            );
+        }
+        // "Examples:" sampling is gone in favor of full per-bucket listings
+        // (TASK-260712-17); zero-count buckets (Conflicts, Disabled) must
+        // not get a heading either.
+        assert!(!report.contains("Examples:"), "{report}");
+        assert!(!report.contains("Conflicts (0)"), "{report}");
+        assert!(
+            !report.contains("Disabled by terminal capability (0)"),
+            "{report}"
+        );
+    }
+
+    /// A multi-entry bucket must list every entry, not just the first one
+    /// (TASK-260712-17 testcase: 複数 entry を含む bucket の全 entry が出力に現れる).
+    #[test]
+    fn report_render_lists_every_entry_in_a_multi_entry_bucket() {
+        let imported = import_vscode_keybindings(
+            r#"[
+                { "key": "cmd+t", "command": "workbench.action.terminal.new" },
+                { "key": "cmd+p", "command": "workbench.action.quickOpen" },
+                { "key": "cmd+shift+e", "command": "workbench.view.explorer" }
+            ]"#,
+            &KeyboardCapabilities::modern(),
+        )
+        .unwrap();
+
+        assert_eq!(imported.report.ignored.len(), 3);
+        let report = imported.report.render_text();
+        assert!(report.contains("Ignored (3):"), "{report}");
+        for expected in [
+            "- cmd+t -> workbench.action.terminal.new [outside editor scope]",
+            "- cmd+p -> workbench.action.quickOpen [outside editor scope]",
+            "- cmd+shift+e -> workbench.view.explorer [outside editor scope]",
         ] {
             assert!(
                 report.contains(expected),

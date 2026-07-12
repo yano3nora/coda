@@ -17,7 +17,7 @@ pub use binding::{Binding, Source};
 pub use context::EditorContext;
 pub use key_parse::{ParseKeyError, parse_key_chord, parse_key_sequence};
 pub use predicate::{ContextPredicate, ParsePredicateError};
-pub use report::{ImportReport, ImportSummary, ReportEntry};
+pub use report::{ImportReport, ImportSummary, ReportEntry, ReportStyle};
 pub use resolver::{ResolveResult, Resolver};
 pub use user_bindings::{
     BindingIssue, BindingIssueReason, UserBindingsError, UserBindingsLoad,
