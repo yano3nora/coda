@@ -347,6 +347,7 @@ const COMMON: &[RawBinding] = &[
         Source::Default,
     ),
     ("ctrl+s", EditorAction::FileSave, None, Source::Default),
+    ("ctrl+g", EditorAction::GoToLine, None, Source::Default),
     ("ctrl+tab", EditorAction::BufferNext, None, Source::Default),
     (
         "ctrl+shift+tab",

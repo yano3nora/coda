@@ -316,8 +316,9 @@ fn decode_sgr_mouse(mouse_params: &[u8], final_byte: u8, bytes: &[u8], consumed:
         match code & 3 {
             0 => MouseEventKind::WheelUp,
             1 => MouseEventKind::WheelDown,
-            // Horizontal wheel (66/67): not part of the ADR-0008 scope.
-            _ => return unknown(),
+            2 => MouseEventKind::WheelLeft,
+            3 => MouseEventKind::WheelRight,
+            _ => unreachable!("masked to two bits"),
         }
     } else {
         let button = match code & 3 {
@@ -767,11 +768,12 @@ mod tests {
                 )))],
             ),
             (
-                "horizontal wheel is out of scope and falls back to Unknown",
-                b"\x1b[<66;1;1M",
-                vec![InputEvent::Key(KeyEvent::plain(Key::Unknown(
-                    b"\x1b[<66;1;1M".to_vec(),
-                )))],
+                "horizontal wheel left / right",
+                b"\x1b[<66;1;1M\x1b[<67;1;1M",
+                vec![
+                    mouse(MouseEventKind::WheelLeft, Modifiers::default(), 1, 1),
+                    mouse(MouseEventKind::WheelRight, Modifiers::default(), 1, 1),
+                ],
             ),
         ];
 

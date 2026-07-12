@@ -19,6 +19,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PromptPurpose {
     SaveAs,
+    GoToLine,
 }
 
 /// Result of feeding one key to the overlay.

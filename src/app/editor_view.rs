@@ -408,6 +408,14 @@ impl EditorView {
         }
     }
 
+    /// Scrolls an unwrapped viewport horizontally without moving the cursor.
+    /// Wrap mode deliberately has no horizontal viewport.
+    pub fn scroll_columns(&mut self, delta: isize, wrap: bool) {
+        if !wrap {
+            self.left_col = self.left_col.saturating_add_signed(delta);
+        }
+    }
+
     fn cursor_screen_position_wrapped(
         &self,
         editor: &EditorCore,

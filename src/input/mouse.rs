@@ -23,6 +23,8 @@ pub enum MouseEventKind {
     Release(MouseButton),
     WheelUp,
     WheelDown,
+    WheelLeft,
+    WheelRight,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

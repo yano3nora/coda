@@ -12,7 +12,7 @@
 - ~~split views: vertical / horizontal、pane focus、maximize~~
   - split は多機能 editor のやることであり、現時点の coda の責務範囲ではない
 - 完了 (260712) → [TASK-260712 mouse / verify / inactive / SSH bootstrap](TASK-260712-mouse-verify-inactive-ssh.md)
-- [ ] mouse 追補: double / triple click (単語・行選択)、tab bar click での buffer 切替 (ADR-0008 Open Question)
+- 完了 (260713) → [TASK-260713 mouse / palette / go to line](TASK-260713-mouse-palette-goto-line.md)
 - [ ] OS 予約キー (`Cmd+Q` / `Cmd+Tab` 等) の `Unsupported: OS/terminal reserved` 分類 (ADR-0007 §4。SPEC-0004 に仕様だけ先行)
 - [ ] keymap verify 結果の永続化と resolver への反映 (`TERM_PROGRAM` + version キー。ADR-0007 Open Question)
 

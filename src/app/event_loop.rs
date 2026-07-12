@@ -8,6 +8,7 @@ use std::{
 };
 
 use libc::STDIN_FILENO;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     core::editor::{EditorCore, Motion},
@@ -46,6 +47,8 @@ const IDLE_POLL_MS: i32 = 100;
 /// Wheel scroll unit (ADR-0008 Open Question answer, 260712): 3 visual rows
 /// per notch, no acceleration.
 const WHEEL_SCROLL_LINES: isize = 3;
+const WHEEL_SCROLL_COLUMNS: isize = 3;
+const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 /// Keyboard capability negotiation deadline (SPEC-0003 Open Question answer,
 /// design decision 260712): DA1 answering first resolves "legacy" sooner on
 /// terminals that support it, so this is a worst-case fallback, not the
@@ -157,6 +160,7 @@ pub struct EventLoop {
     /// Buffer position where the current left-button drag started (ADR-0008):
     /// set on press, extended into a selection on drag, cleared on release.
     drag_anchor: Option<Position>,
+    last_click: Option<(Instant, Position, u8)>,
     /// Whether `draw` keeps the viewport attached to the cursor. Wheel
     /// scrolling detaches (the view moves, the cursor stays); any keystroke
     /// or click re-attaches — mirroring how GUI editors treat scroll vs input.
@@ -245,6 +249,7 @@ impl EventLoop {
             capability_warning: true,
             screen_size: (80, 24),
             drag_anchor: None,
+            last_click: None,
             follow_cursor: true,
         })
     }
@@ -466,10 +471,40 @@ impl EventLoop {
         match mouse.kind {
             MouseEventKind::WheelUp => self.scroll_view(-WHEEL_SCROLL_LINES),
             MouseEventKind::WheelDown => self.scroll_view(WHEEL_SCROLL_LINES),
+            MouseEventKind::WheelLeft => self.scroll_view_horizontal(-WHEEL_SCROLL_COLUMNS),
+            MouseEventKind::WheelRight => self.scroll_view_horizontal(WHEEL_SCROLL_COLUMNS),
             MouseEventKind::Press(MouseButton::Left) => {
+                if mouse.row == 1 {
+                    if let Some(index) = tab_index_at_column(
+                        &self.tab_items(),
+                        mouse.column.saturating_sub(1),
+                        self.screen_size.0,
+                    ) {
+                        self.active = index;
+                        self.search.close();
+                        self.close_guard.reset();
+                    }
+                    return QuitDecision::Continue;
+                }
                 if let Some(position) = self.mouse_buffer_position(&mouse) {
-                    self.editor_mut().set_cursor_position(position);
-                    self.drag_anchor = Some(position);
+                    let now = Instant::now();
+                    let count = self
+                        .last_click
+                        .filter(|(at, previous, _)| {
+                            *previous == position && now.duration_since(*at) <= MULTI_CLICK_INTERVAL
+                        })
+                        .map_or(1, |(_, _, count)| (count % 3) + 1);
+                    self.last_click = Some((now, position, count));
+                    match count {
+                        2 => self.select_word_at(position),
+                        3 => self.select_line_at(position.line),
+                        _ => self.editor_mut().set_cursor_position(position),
+                    }
+                    self.drag_anchor = Some(
+                        self.editor()
+                            .selection
+                            .map_or(position, |selection| selection.anchor),
+                    );
                     self.follow_cursor = true;
                 }
             }
@@ -514,6 +549,56 @@ impl EventLoop {
             .view
             .scroll_lines(&document.editor, delta, width, wrap);
         self.follow_cursor = false;
+    }
+
+    fn scroll_view_horizontal(&mut self, delta: isize) {
+        let wrap = self.wrap;
+        self.active_document_mut().view.scroll_columns(delta, wrap);
+        self.follow_cursor = false;
+    }
+
+    fn select_word_at(&mut self, position: Position) {
+        let Some(line) = self.editor().buffer.line(position.line) else {
+            return;
+        };
+        let graphemes = line.graphemes(true).collect::<Vec<_>>();
+        if graphemes.is_empty() {
+            return;
+        }
+        let at = position.grapheme.min(graphemes.len().saturating_sub(1));
+        let class = |g: &str| {
+            if g.chars().all(char::is_whitespace) {
+                0
+            } else if g.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                1
+            } else {
+                2
+            }
+        };
+        let target = class(graphemes[at]);
+        let mut start = at;
+        while start > 0 && class(graphemes[start - 1]) == target {
+            start -= 1;
+        }
+        let mut end = at + 1;
+        while end < graphemes.len() && class(graphemes[end]) == target {
+            end += 1;
+        }
+        self.editor_mut().select_range(
+            Position::new(position.line, start),
+            Position::new(position.line, end),
+        );
+    }
+
+    fn select_line_at(&mut self, line: usize) {
+        let last = self.editor().buffer.line_count().saturating_sub(1);
+        let line = line.min(last);
+        let end = if line < last {
+            Position::new(line + 1, 0)
+        } else {
+            Position::new(line, self.editor().buffer.grapheme_count(line))
+        };
+        self.editor_mut().select_range(Position::new(line, 0), end);
     }
 
     /// Feeds a decoded capability-query reply to the in-flight probe, if
@@ -678,7 +763,17 @@ impl EventLoop {
                 self.palette.move_selection(-1, count);
                 Some(QuitDecision::Continue)
             }
+            Key::Char('p') if event.modifiers == Modifiers::none().with_ctrl() => {
+                let count = filter_actions(&self.palette.query, self.resolver.bindings()).len();
+                self.palette.move_selection(-1, count);
+                Some(QuitDecision::Continue)
+            }
             Key::Down if event.modifiers == Modifiers::none() => {
+                let count = filter_actions(&self.palette.query, self.resolver.bindings()).len();
+                self.palette.move_selection(1, count);
+                Some(QuitDecision::Continue)
+            }
+            Key::Char('n') if event.modifiers == Modifiers::none().with_ctrl() => {
                 let count = filter_actions(&self.palette.query, self.resolver.bindings()).len();
                 self.palette.move_selection(1, count);
                 Some(QuitDecision::Continue)
@@ -693,6 +788,10 @@ impl EventLoop {
             }
             Key::Backspace if event.modifiers == Modifiers::none() => {
                 self.palette.backspace();
+                Some(QuitDecision::Continue)
+            }
+            Key::Char('u') if event.modifiers == Modifiers::none().with_ctrl() => {
+                self.palette.clear_query();
                 Some(QuitDecision::Continue)
             }
             Key::Char(character)
@@ -903,6 +1002,10 @@ impl EventLoop {
                 self.search.close();
                 self.palette.open();
             }
+            EditorAction::GoToLine => {
+                self.palette.close();
+                self.prompt.open(PromptPurpose::GoToLine, "Go to Line:", "");
+            }
             EditorAction::InspectorOpen => {
                 self.search.close();
                 self.inspector.open();
@@ -1098,11 +1201,30 @@ impl EventLoop {
         };
         let input = self.prompt.input.trim().to_string();
         if input.is_empty() {
-            self.message = "save as: path cannot be empty".to_string();
+            self.message = "input cannot be empty".to_string();
             return QuitDecision::Continue;
         }
         match purpose {
             PromptPurpose::SaveAs => self.perform_save_as(PathBuf::from(input)),
+            PromptPurpose::GoToLine => {
+                match input.parse::<usize>() {
+                    Ok(line) if line > 0 => {
+                        let last = self.editor().buffer.line_count().max(1);
+                        let target = line.min(last);
+                        self.editor_mut()
+                            .set_cursor_position(Position::new(target - 1, 0));
+                        self.prompt.close();
+                        self.follow_cursor = true;
+                        self.message = if line > last {
+                            format!("line {line} out of range; moved to {last}")
+                        } else {
+                            format!("line {line}")
+                        };
+                    }
+                    _ => self.message = "line number must be a positive integer".to_string(),
+                }
+                QuitDecision::Continue
+            }
         }
     }
 
@@ -1329,6 +1451,26 @@ fn draw_tab_bar(screen: &mut Screen, tabs: &[TabItem]) {
         let label = ellipsize(&tab.label, remaining);
         x = screen.put_str(x as u16, 0, &label, style);
     }
+}
+
+fn tab_index_at_column(tabs: &[TabItem], column: u16, width: u16) -> Option<usize> {
+    let mut x = 0usize;
+    let target = usize::from(column);
+    let width = usize::from(width);
+    for (index, tab) in tabs.iter().enumerate() {
+        if index > 0 {
+            x += 2;
+        }
+        if x >= width {
+            break;
+        }
+        let len = ellipsize(&tab.label, width - x).chars().count();
+        if target >= x && target < x + len {
+            return Some(index);
+        }
+        x += len;
+    }
+    None
 }
 
 fn ellipsize(text: &str, width: usize) -> String {

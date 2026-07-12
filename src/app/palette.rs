@@ -47,6 +47,11 @@ impl CommandPalette {
         self.selected = 0;
     }
 
+    pub fn clear_query(&mut self) {
+        self.query.clear();
+        self.selected = 0;
+    }
+
     pub fn move_selection(&mut self, delta: isize, item_count: usize) {
         if item_count == 0 {
             self.selected = 0;
@@ -179,7 +184,19 @@ fn clip_to_width(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_actions, scroll_offset};
+    use super::{CommandPalette, filter_actions, scroll_offset};
+
+    #[test]
+    fn clear_query_removes_input_and_resets_selection() {
+        let mut palette = CommandPalette {
+            visible: true,
+            query: "save".to_string(),
+            selected: 3,
+        };
+        palette.clear_query();
+        assert!(palette.query.is_empty());
+        assert_eq!(palette.selected, 0);
+    }
 
     #[test]
     fn scroll_offset_keeps_selection_visible() {

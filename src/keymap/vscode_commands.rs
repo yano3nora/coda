@@ -20,6 +20,7 @@ pub fn action_for_vscode_command(command: &str) -> Option<EditorAction> {
         "cursorLineEnd" | "cursorEnd" => EditorAction::CursorLineEnd,
         "cursorPageDown" => EditorAction::CursorPageDown,
         "cursorPageUp" => EditorAction::CursorPageUp,
+        "workbench.action.gotoLine" => EditorAction::GoToLine,
         // Selection movement
         "cursorDownSelect" => EditorAction::SelectionDown,
         "cursorUpSelect" => EditorAction::SelectionUp,
