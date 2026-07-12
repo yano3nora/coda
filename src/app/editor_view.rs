@@ -30,6 +30,33 @@ pub struct StatusLine<'a> {
 }
 
 impl EditorView {
+    /// Finalizes the viewport before any viewport-indexed presentation data
+    /// (notably syntax highlights) is fetched. Keeping this as a separate
+    /// phase prevents one-frame mismatches where `draw` scrolls the text
+    /// after highlights were calculated for the old `top_line`.
+    pub fn prepare_viewport(
+        &mut self,
+        editor: &EditorCore,
+        screen_width: u16,
+        editor_rows: usize,
+        wrap: bool,
+        follow_cursor: bool,
+    ) {
+        let gutter = Self::gutter_width(editor);
+        let editor_cols = usize::from(screen_width).saturating_sub(gutter);
+        if wrap {
+            self.left_col = 0;
+            if follow_cursor {
+                self.ensure_cursor_visible_wrapped(editor, editor_rows, editor_cols);
+            }
+        } else {
+            self.top_segment = 0;
+            if follow_cursor {
+                self.ensure_cursor_visible(editor, editor_rows, editor_cols);
+            }
+        }
+    }
+
     /// Width of the line-number gutter, including one trailing space.
     ///
     /// Sized to the whole buffer (not the viewport) so the text area does not
@@ -53,18 +80,13 @@ impl EditorView {
         let gutter = Self::gutter_width(editor);
         let editor_rows = screen.height().saturating_sub(origin_y + 1) as usize;
         let editor_cols = (screen.width() as usize).saturating_sub(gutter);
+        // `event_loop::draw` already calls this before highlight lookup. Keep
+        // the idempotent call here as a safety boundary for direct/test users
+        // of EditorView so draw never renders an off-screen cursor.
+        self.prepare_viewport(editor, screen.width(), editor_rows, wrap, follow_cursor);
         if wrap {
-            // Wrap mode has no horizontal scroll; visual rows absorb the width.
-            self.left_col = 0;
-            if follow_cursor {
-                self.ensure_cursor_visible_wrapped(editor, editor_rows, editor_cols);
-            }
             self.draw_wrapped_rows(editor, screen, highlights, origin_y, gutter, editor_rows);
         } else {
-            self.top_segment = 0;
-            if follow_cursor {
-                self.ensure_cursor_visible(editor, editor_rows, editor_cols);
-            }
             self.draw_unwrapped_rows(editor, screen, highlights, origin_y, gutter, editor_rows);
         }
 
@@ -805,6 +827,30 @@ mod tests {
 
         assert!(view.left_col > 0, "cursor past viewport must scroll");
         assert_eq!(view.top_segment, 0, "wrap-off never uses top_segment");
+    }
+
+    /// Regression for TASK-260713: the event loop needs the final top_line
+    /// before it asks HighlightCache for a viewport-indexed span list.
+    #[test]
+    fn prepare_viewport_settles_cursor_scroll_before_highlight_lookup() {
+        let text = (0..10).map(|n| format!("line {n}\n")).collect::<String>();
+        let (editor, mut view) = view_with(&text, Position::new(8, 0));
+
+        view.prepare_viewport(&editor, 20, 3, false, true);
+
+        assert_eq!(view.top_line, 6, "cursor line 8 must be the last of 3 rows");
+        assert_eq!(view.top_line..view.top_line + 3, 6..9);
+    }
+
+    #[test]
+    fn prepare_viewport_does_not_override_mouse_scrolled_viewport() {
+        let text = (0..10).map(|n| format!("line {n}\n")).collect::<String>();
+        let (editor, mut view) = view_with(&text, Position::new(0, 0));
+        view.top_line = 5;
+
+        view.prepare_viewport(&editor, 20, 3, false, false);
+
+        assert_eq!(view.top_line, 5);
     }
 
     /// TASK-260711-18 testcase: the truncation marker appears only when the

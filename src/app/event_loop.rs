@@ -427,6 +427,20 @@ impl EventLoop {
         let active = self.active;
         let filename = self.documents[active].display_name();
         let editor_rows = screen.height().saturating_sub(2) as usize;
+        // Cursor movement may scroll the viewport. Settle that before asking
+        // the line-indexed highlight cache for spans; otherwise the text is
+        // drawn from the new top_line with colors from the previous one for
+        // a single frame (TASK-260713 cursor-scroll highlight flicker).
+        {
+            let document = &mut self.documents[active];
+            document.view.prepare_viewport(
+                &document.editor,
+                screen.width(),
+                editor_rows,
+                self.wrap,
+                self.follow_cursor,
+            );
+        }
         let path = self.documents[active].path.clone();
         let syntax = path
             .as_deref()
