@@ -16,7 +16,7 @@
 ## tobe
 
 - SGR mouse (DECSET 1002/1006) で click = カーソル移動、drag = selection、
-  wheel = scroll。Shift+drag は terminal 選択として素通し (ADR-0008 §3)
+  wheel = scroll。Shift+drag は terminal 側 override の慣習に依存 (ADR-0008 §3)
 - `coda keymap verify` で imported binding の chord を実際に押して
   delivered / mismatch / skipped を記録し、report を出力する
 - 永久 inactive な imported binding が import report で明示される
@@ -38,7 +38,7 @@
 - [x] `event_loop.rs`: `handle_mouse_event`。left click = カーソル移動 +
       selection 解除 (`EditorCore::set_cursor_position` 新設)、drag =
       `select_range(anchor, pos)`、wheel = 3 行 scroll。Shift 付き mouse event は
-      無視 (terminal 素通し)。palette / prompt / inspector 表示中は無視
+      無視 (受信済みeventは terminal 選択へ戻せない)。palette / prompt / inspector 表示中は無視
 - [x] wheel scroll は cursor を追わない free scroll (`follow_cursor` フラグで
       `ensure_cursor_visible` を抑止)。次の keystroke / click / paste で再追従
 
@@ -80,13 +80,14 @@
 - [x] inactive: `suggestVisible` 依存 binding が inactive bucket に載り、
       `editorFocus && suggestWidgetVisible` のような複合 when も検出される
 - [x] bootstrap.sh: `sh -n` / `dash -n` 構文検査、`--help` 動作、OS/arch 判定ロジック確認
-- [x] `cargo fmt --check` / `cargo clippy -- -D warnings` / `cargo test` pass (269 tests)
+- [x] `cargo fmt --check` / `cargo clippy -- -D warnings` / `cargo test` pass (270 tests)
 
 ## notes
 
 - wheel の単位は 3 行固定で開始 (ADR-0008 Open Question。加速はやらない)
 - double / triple click (単語・行選択) は v0.2 でも見送り継続 (ADR-0008)
-- mouse reporting 有効中は terminal ネイティブ選択が奪われるため、Shift+drag
-  素通しを README / help に明記する
+- mouse reporting 有効中は terminal ネイティブ選択が奪われる。Shift+drag の
+  terminal 側 override に依存し、Shift付きSGR eventは無視するが選択へ戻せない旨を
+  README / help に明記する
 - verify 結果の永続化形式 (TERM_PROGRAM キー等) は ADR-0007 Open Question を
   維持し、本 TASK では report 出力まで

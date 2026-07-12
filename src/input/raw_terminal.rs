@@ -63,6 +63,24 @@ pub(crate) fn set_mouse_reporting_active(active: bool) {
     MOUSE_REPORTING_ACTIVE.store(active, Ordering::SeqCst);
 }
 
+/// Waits until `fd` has input available, or until `timeout_ms` elapses.
+///
+/// Callers own decoding and timeout policy; this wrapper only keeps the
+/// terminal-specific readiness API inside the input layer.
+pub(crate) fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    let mut fds = [libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result > 0 && fds[0].revents & libc::POLLIN != 0)
+    }
+}
+
 /// Restores the original terminal attributes when dropped.
 #[derive(Debug)]
 pub struct RawModeGuard {

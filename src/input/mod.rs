@@ -23,6 +23,7 @@ pub use decoder::{
 pub use key_event::{Key, KeyEvent, Modifiers};
 pub use mouse::{MouseButton, MouseEvent, MouseEventKind};
 pub use raw_terminal::RawModeGuard;
+pub(crate) use raw_terminal::poll_readable;
 
 const EXIT_CTRL_C: u8 = 0x03;
 const EXIT_CTRL_D: u8 = 0x04;
@@ -130,7 +131,8 @@ impl Drop for BracketedPasteGuard {
 /// (ADR-0008 §3): DECSET 1002 (button-event tracking, so drags report) +
 /// 1006 (SGR extended coordinates). Unsupported terminals ignore both.
 /// While active the terminal's native mouse selection is taken over;
-/// Shift+drag stays with the terminal by convention.
+/// Terminal-native selection relies on the terminal reserving Shift+drag
+/// before it delivers an SGR event to the application.
 pub struct MouseReportingGuard;
 
 impl MouseReportingGuard {

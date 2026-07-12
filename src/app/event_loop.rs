@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use libc::{POLLIN, STDIN_FILENO, pollfd};
+use libc::STDIN_FILENO;
 
 use crate::{
     core::editor::{EditorCore, Motion},
@@ -17,7 +17,7 @@ use crate::{
         BracketedPasteGuard, CapabilityDetection, CapabilityProbe, InputEvent, Key, KeyEvent,
         KeyboardCapabilities, KeyboardProtocolGuard, Modifiers, MouseButton, MouseEvent,
         MouseEventKind, MouseReportingGuard, RawModeGuard, drain_input_events,
-        flush_pending_escape,
+        flush_pending_escape, poll_readable,
         quirks::{self, QuirkEffect, TerminalQuirk},
     },
     keymap::{EditorAction, EditorContext, ResolveResult, Resolver},
@@ -337,7 +337,7 @@ impl EventLoop {
             prev = next;
 
             let timeout = self.poll_timeout_ms();
-            if poll_stdin(STDIN_FILENO, timeout)? {
+            if poll_readable(STDIN_FILENO, timeout)? {
                 let mut chunk = [0_u8; 256];
                 let read = stdin.read(&mut chunk)?;
                 if read == 0 {
@@ -451,10 +451,11 @@ impl EventLoop {
     }
 
     /// Click = cursor move, drag = selection, wheel = viewport scroll
-    /// (ADR-0008 §3). Shift-modified events are left alone so the terminal's
-    /// own Shift+drag selection convention keeps working, and events during
-    /// an overlay are dropped — overlays are keyboard-driven and a click must
-    /// not silently move the cursor underneath them.
+    /// (ADR-0008 §3). Terminals normally reserve Shift+drag before sending an
+    /// SGR event. If one is nevertheless delivered, coda consumes but ignores
+    /// it; input bytes cannot be returned to the terminal after decoding.
+    /// Events during an overlay are also dropped — overlays are keyboard-driven
+    /// and a click must not silently move the cursor underneath them.
     fn handle_mouse_event(&mut self, mouse: MouseEvent) -> QuitDecision {
         if mouse.modifiers.contains_shift() {
             return QuitDecision::Continue;
@@ -1296,20 +1297,6 @@ impl EventLoop {
         } else {
             IDLE_POLL_MS
         }
-    }
-}
-
-fn poll_stdin(fd: i32, timeout_ms: i32) -> io::Result<bool> {
-    let mut fds = [pollfd {
-        fd,
-        events: POLLIN,
-        revents: 0,
-    }];
-    let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
-    if result < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(result > 0 && fds[0].revents & POLLIN != 0)
     }
 }
 
@@ -2335,13 +2322,13 @@ keybind = super+digit_1=goto_tab:1
         let _ = std::fs::remove_file(path);
     }
 
-    /// ADR-0008 §3: Shift+drag belongs to the terminal's native selection —
-    /// if a terminal forwards it anyway, coda must not start a selection.
+    /// ADR-0008 §3: if a terminal forwards Shift+drag instead of reserving it
+    /// for native selection, coda consumes it without starting a selection.
     #[test]
-    fn shift_modified_mouse_events_are_ignored_for_terminal_passthrough() {
+    fn shift_modified_mouse_events_are_ignored_after_delivery() {
         use crate::input::{MouseButton, MouseEvent, MouseEventKind};
 
-        let path = temp_path("mouse-shift-passthrough");
+        let path = temp_path("mouse-shift-ignored");
         std::fs::write(&path, b"alpha\nbravo\n").unwrap();
         let mut event_loop =
             EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();

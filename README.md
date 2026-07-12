@@ -14,7 +14,7 @@ coda
 - kitty keyboard protocol 対応(`Ctrl+J` / `Ctrl+Shift+J` / `Cmd+S` を区別)+ 非対応 terminal への安全な fallback
 - command palette(`F1` は設定が壊れていても常に有効な rescue 入口)
 - 編集基本機能: undo/redo(グルーピング)、find/replace、複数 buffer/tabs、行番号、grapheme 単位の Unicode 処理(日本語・絵文字)
-- mouse support: click = カーソル移動、drag = 選択、wheel = スクロール(SGR)。**Shift+drag は terminal ネイティブ選択に素通し**するので、terminal のマウス選択コピーはそのまま使える
+- mouse support: click = カーソル移動、drag = 選択、wheel = スクロール(SGR)。多くの terminal では **Shift+drag をアプリへ送らず terminal 側の選択に使う**。Shift付きSGR eventを送る terminalでは coda が無視するが、terminal 選択へ戻すことはできない
 - syntax highlighting(syntect、dark/light、表示専用)
 - clipboard: OSC 52 書込(SSH 先から手元の OS clipboard へ)+ bracketed paste
 - 入力の自己診断: `coda inspect-key`(raw input inspector)と `coda keymap verify`(import した binding が実際に届くかの対話実測)

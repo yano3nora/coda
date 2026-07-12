@@ -95,7 +95,7 @@ Resolved action: selection.cursorDown
 - protocol negotiation に terminal が応答しない → timeout 後、保守的な capability(全て false)で続行
 - tmux / screen 経由で protocol が透過されない → 検出結果が実態とずれる可能性がある。inspector で確認可能にする
 - 貼り付け(bracketed paste)と key 入力の混同 → bracketed paste mode を有効化し、paste は key 解決を通さない(paste が editor への text 挿入の第一経路でもある。ADR-0008)
-- mouse event(SGR protocol、v0.2 帯)→ mouse sequence は key 解決を通さず mouse event として decode する。mouse reporting 有効中も Shift+ドラッグは terminal 側選択として素通しされる(ADR-0008)
+- mouse event(SGR protocol、v0.2 帯)→ mouse sequence は key 解決を通さず mouse event として decode する。Shift+ドラッグは terminal がアプリへ送らず native 選択に使う慣習に依存する。Shift付きSGR eventが届いた場合は app 側で無視する(ADR-0008)
 
 ## API / Interface
 

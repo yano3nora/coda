@@ -29,8 +29,8 @@ pub enum MouseEventKind {
 pub struct MouseEvent {
     pub kind: MouseEventKind,
     /// Shift / Alt / Ctrl as encoded in the SGR button code. Shift-modified
-    /// events are ignored app-side so the terminal's own Shift+drag selection
-    /// convention keeps working (ADR-0008 §3).
+    /// events that reach coda are ignored; terminal-native selection only
+    /// works when the terminal reserves Shift+drag before delivery.
     pub modifiers: Modifiers,
     /// 1-based terminal cell column, as sent by SGR.
     pub column: u16,

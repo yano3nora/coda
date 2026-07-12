@@ -10,18 +10,18 @@
 //! the style of `input::inspect_key`, not the editor event loop.
 
 use std::io::{self, Read, Write};
+use std::path::Path;
 
 use crate::{
     input::{
         InputEvent, Key, KeyEvent, KeyboardProtocolGuard, Modifiers, RawModeGuard,
-        drain_input_events, flush_pending_escape,
+        drain_input_events, flush_pending_escape, poll_readable,
     },
     keymap::{Binding, Source, format_key_for_config},
 };
 
 use super::{
     config,
-    event_loop::poll_stdin,
     import_cli::{config_base_dir, write_parented},
 };
 
@@ -201,16 +201,36 @@ pub(crate) fn run_keymap_verify() -> i32 {
         println!("{line}");
     }
 
-    if let Some(base_dir) = config_base_dir() {
-        let path = base_dir.join("import-reports").join("latest-verify.txt");
-        let mut body = lines.join("\n");
-        body.push('\n');
-        match write_parented(&path, body.as_bytes()) {
-            Ok(()) => println!("report written to {}", path.display()),
-            Err(error) => eprintln!("could not write {}: {error}", path.display()),
+    let base_dir = config_base_dir();
+    match persist_report(base_dir.as_deref(), &lines) {
+        Ok(()) => {
+            let path = base_dir
+                .expect("persist_report succeeded only when a config base exists")
+                .join("import-reports")
+                .join("latest-verify.txt");
+            println!("report written to {}", path.display());
+            0
+        }
+        Err(error) => {
+            eprintln!("could not write verify report: {error}");
+            1
         }
     }
-    0
+}
+
+/// Persists a completed measurement. A missing config root is an error rather
+/// than a silent success because the command promises a reusable report.
+fn persist_report(base_dir: Option<&Path>, lines: &[String]) -> io::Result<()> {
+    let base_dir = base_dir.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "neither XDG_CONFIG_HOME nor HOME is set",
+        )
+    })?;
+    let path = base_dir.join("import-reports").join("latest-verify.txt");
+    let mut body = lines.join("\n");
+    body.push('\n');
+    write_parented(&path, body.as_bytes())
 }
 
 /// Raw-mode read loop. Restores the terminal before returning so the caller
@@ -238,19 +258,21 @@ fn run_interactive(mut session: VerifySession) -> io::Result<VerifySession> {
         // sequence. Only a timeout can disambiguate it — same reasoning as
         // the editor event loop's `flush_pending_escape` path.
         let mut keys: Vec<KeyEvent> = Vec::new();
-        if poll_stdin(libc::STDIN_FILENO, ESC_FLUSH_POLL_MS)? {
+        if poll_readable(libc::STDIN_FILENO, ESC_FLUSH_POLL_MS)? {
             let read = stdin.read(&mut chunk)?;
             if read == 0 {
                 write_raw_line(&mut stdout, "stdin closed; stopping")?;
                 break;
             }
             byte_buffer.extend_from_slice(&chunk[..read]);
-            keys.extend(drain_input_events(&mut byte_buffer).into_iter().filter_map(
-                |event| match event {
-                    InputEvent::Key(key) => Some(key),
-                    _ => None, // capability replies etc. are not presses
-                },
-            ));
+            keys.extend(
+                drain_input_events(&mut byte_buffer)
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        InputEvent::Key(key) => Some(key),
+                        _ => None, // capability replies etc. are not presses
+                    }),
+            );
         } else if let Some(key) = flush_pending_escape(&mut byte_buffer) {
             keys.push(key);
         }
@@ -310,7 +332,7 @@ fn write_raw_line(stdout: &mut impl Write, line: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChordOutcome, FeedResult, VerifySession};
+    use super::{ChordOutcome, FeedResult, VerifySession, persist_report};
     use crate::keymap::{Binding, EditorAction, Source, parse_key_sequence};
 
     fn binding(keys: &str, action: EditorAction, source: Source) -> Binding {
@@ -438,5 +460,11 @@ mod tests {
             !summary.iter().any(|line| line.contains("--cmd=ctrl")),
             "{summary:?}"
         );
+    }
+
+    #[test]
+    fn persist_report_rejects_a_missing_config_root() {
+        let error = persist_report(None, &["summary".to_string()]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 }

@@ -68,7 +68,7 @@
 - [x] `--cmd=ctrl`: `cmd+s` が `ctrl+s` として import され、既存 `ctrl+s` binding
       と衝突する場合 conflict bucket に載る (`cmd+ctrl+s` の縮退・sequence 変換も)
 - [x] `--cmd=both`: 2 binding 登録と report 件数の整合
-- [x] `cargo fmt --check` / `cargo clippy -- -D warnings` / `cargo test` pass (269 tests)
+- [x] `cargo fmt --check` / `cargo clippy -- -D warnings` / `cargo test` pass (270 tests)
 
 ## notes
 

@@ -97,7 +97,7 @@ ADR-0001 の Non-goals に加え、MVP では以下を実装しない。
 ### Mouse Support(MVP 後半または v0.2。ADR-0008)
 
 - click = カーソル移動、drag = selection、wheel = スクロール(SGR mouse protocol)
-- Shift+ドラッグは terminal ネイティブ選択として素通しする(terminal のマウス選択コピーと共存)
+- Shift+ドラッグは terminal がアプリへ送らず native 選択に使う慣習に依存する。Shift付きSGR eventを受信した場合は無視するが、terminal 選択へ戻すことはできない
 
 ## Invariants
 

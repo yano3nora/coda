@@ -211,8 +211,11 @@ main() {
     fi
 
     log "extracting ..."
-    # Extract only the expected member: hostile entries (absolute paths,
-    # ../ traversal, symlinks) can never match the literal name "coda".
+    # Release archives contain exactly one root member. Reject extras before
+    # extraction so traversal entries and unexpected payloads are never
+    # materialized, even if a tar implementation has permissive defaults.
+    archive_members=$(tar -tzf "$tmp_dir/$asset") || fail "could not inspect $asset"
+    [ "$archive_members" = "coda" ] || fail "unexpected archive contents; expected only 'coda'"
     tar -xzf "$tmp_dir/$asset" -C "$tmp_dir" coda || fail "failed to extract 'coda' from $asset"
     [ -f "$tmp_dir/coda" ] || fail "binary 'coda' not found at archive root of $asset"
     [ ! -L "$tmp_dir/coda" ] || fail "'coda' in $asset is a symlink; refusing to install"

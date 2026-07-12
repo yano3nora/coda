@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{InputEvent, RawModeGuard, drain_input_events};
+use super::{InputEvent, RawModeGuard, drain_input_events, poll_readable};
 
 /// What this terminal can deliver to us, expressed as capabilities rather
 /// than protocol names (SPEC-0003). The keymap importer and resolver only
@@ -218,7 +218,7 @@ fn probe_blocking_tty(timeout: Duration) -> io::Result<CapabilityDetection> {
             return Ok(CapabilityDetection::LegacyTimeout);
         }
         let remaining_ms = (deadline - now).as_millis().min(i32::MAX as u128) as i32;
-        if !poll_stdin(libc::STDIN_FILENO, remaining_ms)? {
+        if !poll_readable(libc::STDIN_FILENO, remaining_ms)? {
             // `poll` timed out; loop back around to the deadline check above
             // rather than trusting `remaining_ms` twice.
             continue;
@@ -234,20 +234,6 @@ fn probe_blocking_tty(timeout: Duration) -> io::Result<CapabilityDetection> {
                 return Ok(detection);
             }
         }
-    }
-}
-
-fn poll_stdin(fd: i32, timeout_ms: i32) -> io::Result<bool> {
-    let mut fds = [libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
-    if result < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(result > 0 && fds[0].revents & libc::POLLIN != 0)
     }
 }
 
