@@ -1,4 +1,4 @@
-# TASK-260712-18: import report の stdout 出力を bucket ごとに色分け
+# TASK-260712: import report の stdout 出力を bucket ごとに色分け
 
 260712 import report color
 ===
@@ -59,4 +59,4 @@
 - 外部 crate は追加しない(プロジェクトの流儀: raw ANSI + libc)
 - 256色 / truecolor を使わないのは、report は capability 検出前でも表示される可能性があるため最小公倍数に倒す判断
 - TUI 本体(`ui/render.rs`)の色機構とは意図的に独立させる。report は CLI (非 alt-screen) 出力であり、ui/ に依存させると層違反になる(AGENTS.md 依存境界)
-- 先行タスク: [TASK-260712-17](TASK-260712-17-import-report-full-listing.md)(全件リスト化)
+- 先行タスク: [TASK-260712-17](TASK-260712-import-report-full-listing.md)(全件リスト化)

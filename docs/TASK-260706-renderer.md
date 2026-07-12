@@ -1,4 +1,4 @@
-# TASK-260706-07: Screen buffer と差分 renderer
+# TASK-260706: Screen buffer と差分 renderer
 
 260706 renderer
 ===

@@ -1,4 +1,4 @@
-# TASK-260706-06: User bindings.json loader
+# TASK-260706: User bindings.json loader
 
 260706 user bindings loader
 ===

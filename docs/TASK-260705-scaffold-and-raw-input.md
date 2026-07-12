@@ -1,4 +1,4 @@
-# TASK-260705-01: Cargo scaffold と raw input 表示プログラム
+# TASK-260705: Cargo scaffold と raw input 表示プログラム
 
 260705 cargo scaffold + raw input echo
 ===
@@ -38,5 +38,5 @@
     - codex 実装は termios FFI (struct layout 含む) を手書きしていたため、指示どおり `libc` crate ベースに置き換えた (platform layout を手で保守しない)
     - stdin EOF 時に `read == 0` を `continue` しており busy loop で残留するバグを PTY smoke test で検出。EOF で終了するよう修正
 - crate 名 `coda` は working name (ADR-0001 Open Questions: 名称衝突あり、公開前に再検討)
-- raw bytes の解釈 (normalized key event 化) は TASK-260705-02 で行う。本タスクは「bytes が見える」ところまで
+- raw bytes の解釈(normalized key event 化)は [normalized key event task](TASK-260705-normalized-key-event.md)で行う。本タスクは「bytes が見える」ところまで
 - commit は人間が行う (AGENTS.md)

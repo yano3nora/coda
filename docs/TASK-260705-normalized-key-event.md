@@ -1,11 +1,11 @@
-# TASK-260705-02: Normalized key event と modifier 判定
+# TASK-260705: Normalized key event と modifier 判定
 
 260705 normalized key event decoder
 ===
 
 ## asis
 
-- TASK-260705-01 により raw bytes の表示までは可能 (前提: 本タスクは 01 完了後に着手)
+- [scaffold and raw input task](TASK-260705-scaffold-and-raw-input.md)により raw bytes の表示までは可能
 - raw bytes を環境非依存の key 表現へ変換する層 (SPEC-0003 の normalized key event) が存在しない
 
 ## tobe

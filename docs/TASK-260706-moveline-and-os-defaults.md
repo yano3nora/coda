@@ -1,11 +1,11 @@
-# TASK-260706-11: 行移動系 action の実装と OS 標準 default keymap
+# TASK-260706: 行移動系 action の実装と OS 標準 default keymap
 
 260706 move lines + OS standard defaults
 ===
 
 ## asis
 
-- 2 回目の dogfood で判明(TASK-260706-11 と同時に修正済みの kitty protocol 順序バグとは別件):
+- 2 回目の dogfood で判明(本タスクと同時に修正済みの kitty protocol 順序バグとは別件):
     - `edit.moveLinesUp/Down`・`edit.insertLineAfter/Before` が dispatch で `not implemented` のまま(import 対象なのに動かない)
     - default keymap が最小すぎて、macOS 標準の text 操作(`Cmd+矢印` で行頭行末、`Option+矢印` で単語移動等)が使えない。「OS 慣習キーは import 以前の前提」というフィードバック
 

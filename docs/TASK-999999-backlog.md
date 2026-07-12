@@ -1,7 +1,7 @@
 # TASK-999999: Backlog
 
 日付に依存しない deferred task の索引。v0.1 までの作業と release gate は
-[TASK-260712-19](TASK-260712-19-v0.1-release-readiness.md)を正とする。
+[v0.1 release readiness](TASK-260712-v0.1-release-readiness.md)を正とする。
 
 ## P1: v0.1 後に早めに欲しい
 
@@ -24,10 +24,11 @@
 - [ ] OSC 52 拒否環境の local fallback（pbcopy / xclip / wl-copy）
 - [ ] SSH bootstrap script
 - [ ] Homebrew / crates.io / mise registry への配布拡大
+- [ ] GitHub Actions による CI（macOS + Linux での fmt / clippy / test。260712 に一度作成したが「複数 platform test を常時回す段階ではない」ため撤去。contributor が増えた時点で再判断）
 - [ ] GitHub Actions による tag 起点の自動 publish
 
 ## 運用
 
 - 着手時に日付付き TASK を作り、この一覧から詳細を移す
-- 同日に複数 TASK がある場合だけ `TASK-YYMMDD-NN-topic.md` とする
+- 同日の TASK が複数あっても `TASK-YYMMDD-topic.md` の内容名で区別する
 - 機能追加前に「terminal での短時間編集を改善するか」「keymap import より優先か」を確認する

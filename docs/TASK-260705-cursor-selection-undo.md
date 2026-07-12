@@ -1,4 +1,4 @@
-# TASK-260705-04: Cursor 移動・Selection・Undo と EditorCore facade
+# TASK-260705: Cursor 移動・Selection・Undo と EditorCore facade
 
 260705 cursor / selection / undo
 ===

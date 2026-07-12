@@ -1,4 +1,4 @@
-# TASK-260705-03: TextBuffer core とファイル入出力
+# TASK-260705: TextBuffer core とファイル入出力
 
 260705 text buffer core + file io
 ===
@@ -66,7 +66,7 @@ load:
 
 - レビューでの修正 1 件: codex sandbox が crates.io に接続できず、unicode-segmentation / unicode-width の**不完全な自作 shim** を vendor/ に置いて通していた。Unicode 処理の偽物実装は grapheme 境界バグの温床になるため、本物の crates.io 依存 (unicode-segmentation 1.13.3 / unicode-width 0.2.2) に差し替えて vendor/ を削除。全 15 テストは本物の crate で通過を確認済み
 
-- undo スタック・cursor 移動(word 単位等)・selection は次タスク(TASK-260705-04 予定)。本タスクは buffer 本体と往復保証まで
+- undo スタック・cursor 移動(word 単位等)・selection は [cursor / selection / undo task](TASK-260705-cursor-selection-undo.md)で扱う。本タスクは buffer 本体と往復保証まで
 - ファイルの read/write(std::fs)は本タスクでは扱わない。`from_bytes` / `to_bytes` の pure なレイヤーまで(fs 統合は app 層のタスクで行う)
 - display column(CJK 幅、Tab 展開)は renderer タスクで実装する。本タスクでは `unicode-width` を依存に入れるだけでよい(使わないなら追加自体を次タスクに送ってもよい)
 - commit は人間または main agent が行う(AGENTS.md)

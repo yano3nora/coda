@@ -1,11 +1,11 @@
-# TASK-260706-13: Clipboard (OSC 52 copy + bracketed paste)
+# TASK-260706: Clipboard (OSC 52 copy + bracketed paste)
 
 260706 clipboard
 ===
 
 ## asis
 
-- copy / cut / paste の action が存在せず、terminal からの貼り付け(bracketed paste)も key 入力として流れ込む(TASK-08 時点の既知課題)
+- copy / cut / paste の action が存在せず、terminal からの貼り付け(bracketed paste)も key 入力として流れ込む([event loop editor task](TASK-260706-event-loop-editor.md)時点の既知課題)
 - 方針は ADR-0008 で決定済み: 書込は OSC 52(SSH でも動く)、読出は terminal の bracketed paste を第一経路、内部 clipboard は常に保持
 
 ## tobe

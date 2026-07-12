@@ -1,4 +1,4 @@
-# TASK-260712-17: import report の全件リスト化と summary 重複出力の解消
+# TASK-260712: import report の全件リスト化と summary 重複出力の解消
 
 260712 import report full listing
 ===
@@ -45,4 +45,4 @@
 
 - `ReportEntry` / bucket 分類のデータモデルは変更不要。表示層のみの修正
 - SPEC-0004 の「利用者が『何を失ったか』を把握できる」が本製品の import 機能の最優先要件(import 成功率より優先)
-- terminal capability 連携 (`disabled_by_terminal_capability` の実データ化) は別タスク(TASK-260712-16 参照)。本タスクでは扱わない
+- terminal capability 連携(`disabled_by_terminal_capability` の実データ化)は [keyboard capability detection](TASK-260712-keyboard-capability-detection.md)で扱う。本タスクでは扱わない

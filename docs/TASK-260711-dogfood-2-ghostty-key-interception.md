@@ -1,4 +1,4 @@
-# TASK-260711-17: 2nd dogfood — Ghostty による key 横取りへの対応と「届かない key」の明文化
+# TASK-260711: 2nd dogfood — Ghostty による key 横取りへの対応と「届かない key」の明文化
 
 260711 dogfood 2: ghostty key interception & explainability
 ===

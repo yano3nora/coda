@@ -1,4 +1,4 @@
-# TASK-260712-16: keyboard capability 検出の結線
+# TASK-260712: keyboard capability 検出の結線
 
 260712 keyboard capability detection wiring
 ===
@@ -51,7 +51,7 @@
 - `run()` で `KeyboardProtocolGuard::push` の直後に `CSI c` を書いて probe を arm(deadline = now + 500ms)
 - `handle_input_event` に `CapabilityReply` / `DeviceAttributes` の arm を追加し probe へ。メインループ毎周で `on_tick`。resolve 時:
     - `capabilities` / `capability_detection` を保存
-    - legacy なら warning を `self.message` の**先頭に** prepend(TASK-17 の Ghostty warning と同じ理由)。文言: `legacy terminal input: Ctrl+Shift+J / Shift+Enter etc. cannot be distinguished — run inspector.open for details`
+    - legacy なら warning を `self.message` の**先頭に** prepend([Ghostty key interception](TASK-260711-dogfood-2-ghostty-key-interception.md)の warning と同じ理由)。文言: `legacy terminal input: Ctrl+Shift+J / Shift+Enter etc. cannot be distinguished — run inspector.open for details`
     - `capability_warning` config(SPEC-0005)の結線は P1 のまま(常に表示。gate は backlog 済み)
 - `poll_timeout_ms` は idle 100ms のままで良い(on_tick が拾う)
 - resolve 前に editor を quit した場合も何も壊れない(probe は単に捨てられる)
@@ -95,5 +95,5 @@
 - 優先度 P0(MVP 最終タスク)。完了で SPEC-0001 受け入れ基準が全て埋まる
 - ADR-0003 の Open Questions(timeout 値・tmux 検出)への回答: timeout は 500ms + DA1 fallback。`$TMUX` の特別扱いはしない(tmux も DA1 に応答し、extended-keys 透過は inspector で確認可能 = SPEC-0003 Trouble Shooting の導線どおり)
 - runtime resolver での「fallback mode における個別 binding の disabled 化・conflict 表示」は本タスクの scope 外(importer 分類と起動時 warning で「明示」の受け入れ基準は満たす。必要になれば backlog へ)
-- 実装フロー: 設計・TASK 化(main agent)→ Sonnet 委任 → main agent レビュー(省略不可。TASK-17 で毎回実バグ検出の実績)→ PTY E2E → commit は人間判断
+- 実装フロー: 設計・TASK 化(main agent)→ Sonnet 委任 → main agent レビュー(省略不可。Ghostty key interception task で毎回実バグ検出の実績)→ PTY E2E → commit は人間判断
 - 260712 実装記録: Sonnet 委任(170 tests green で納品)→ main agent レビューで**実害のある edge case 1 件検出・修正**: `probe_blocking` が stdin の TTY 判定しかしておらず、`coda keymap import vscode k.json > report.txt` のような **stdout redirect 時に query の escape bytes が redirect 先ファイルへ混入 + 応答が来ないので 500ms ブロック → 偽 legacy 判定で bindings を誤 disable** する。stdout も TTY であることを要求する形に修正(`AssumedModern` の文言も `not an interactive terminal` へ変更)。fmt / clippy / test(170)green、PTY E2E 4 本(legacy timeout / 模擬 modern 応答 / **DA1 先着 legacy(timeout 不要の即確定)** / 非 TTY import)実測 green。実 Ghostty(modern 環境)での warning 非表示は人間 dogfood で最終確認のこと。commit は人間判断待ち

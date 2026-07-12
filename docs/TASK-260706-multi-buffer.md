@@ -1,4 +1,4 @@
-# TASK-260706-15: 複数 buffer / tabs
+# TASK-260706: 複数 buffer / tabs
 
 260706 multi buffer tabs
 ===

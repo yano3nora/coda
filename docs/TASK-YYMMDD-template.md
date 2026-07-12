@@ -1,7 +1,7 @@
 # TASK-YYMMDD: TODO
 
-同日に複数 TASK を作る場合のみ `TASK-YYMMDD-NN-topic.md` とし、見出しも
-`TASK-YYMMDD-NN` にする。日付をまたぐ通し番号や、backlog を表す `99` は使わない。
+ファイル名は `TASK-YYMMDD-topic.md` とする。同日の TASK が複数あっても内容名で
+区別し、通し番号や backlog を表す `99` は使わない。
 
 YYMMDD title
 ===

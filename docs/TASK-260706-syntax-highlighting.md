@@ -1,4 +1,4 @@
-# TASK-260706-14: Syntax highlighting (syntect + dark/light theme)
+# TASK-260706: Syntax highlighting (syntect + dark/light theme)
 
 260706 syntax highlighting
 ===

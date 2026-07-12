@@ -1,4 +1,4 @@
-# TASK-260705-05: Context-aware keymap resolver
+# TASK-260705: Context-aware keymap resolver
 
 260705 keymap resolver
 ===

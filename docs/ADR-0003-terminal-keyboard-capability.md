@@ -76,4 +76,4 @@ Greenfield のため影響なし。
 ## Progress
 
 - 2026-07-05: 初版作成(Proposed)。詳細仕様は SPEC-0003。
-- 2026-07-12: TASK-260712-16 で実装(Accepted)。検出は `CSI ?u` 応答 + DA1 fallback、`input/capabilities.rs` の `CapabilityProbe`(pure)+ event loop 結線。importer の `Disabled by terminal capability` 分類と起動時 warning、inspector の protocol 行まで結線。
+- 2026-07-12: [keyboard capability detection task](TASK-260712-keyboard-capability-detection.md)で実装(Accepted)。検出は `CSI ?u` 応答 + DA1 fallback、`input/capabilities.rs` の `CapabilityProbe`(pure)+ event loop 結線。importer の `Disabled by terminal capability` 分類と起動時 warning、inspector の protocol 行まで結線。

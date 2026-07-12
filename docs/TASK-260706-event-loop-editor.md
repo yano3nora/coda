@@ -1,4 +1,4 @@
-# TASK-260706-08: Event loop・editor view・minimal palette 統合
+# TASK-260706: Event loop・editor view・minimal palette 統合
 
 260706 event loop + editor + palette
 ===

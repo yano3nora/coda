@@ -1,11 +1,11 @@
-# TASK-260706-10: VS Code keybindings importer と import report
+# TASK-260706: VS Code keybindings importer と import report
 
 260706 vscode importer + report
 ===
 
 ## asis
 
-- VS Code command 名 → 内部 action の変換表は `keymap/vscode_commands.rs` に実装済み(TASK-09)
+- VS Code command 名 → 内部 action の変換表は `keymap/vscode_commands.rs` に実装済み([first dogfood feedback](TASK-260706-first-dogfood-feedback.md))
 - JSONC 除去・key parse・predicate parse・user bindings loader は完成済み
 - import 機能(SPEC-0004 の中核)と、その結果を起動時に読む経路が存在しない
 

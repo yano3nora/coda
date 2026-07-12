@@ -80,6 +80,9 @@ capability_warning = true   # 起動時の capability warning 表示
 
 [appearance]
 theme = "dark"              # 同梱 theme: "dark" | "light" (ADR-0006)
+
+[editor]
+wrap = false                # visual line wrap の起動時初期値。実行中は view.toggleWrap (alt+z) で切替 (TASK-260711-18)
 ```
 
 ### bindings.json(user binding)
