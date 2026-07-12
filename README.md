@@ -51,6 +51,24 @@ coda inspect-key
 
 エディタ内: `F1` / `Ctrl+Space` で command palette(全操作をインクリメンタルサーチ、bind 済み key 併記)。
 
+### Terminal setup(macOS)
+
+**設定ゼロでも動く**のが原則。default keymap は host OS の text 編集慣行に従う([ADR-0011](docs/ADR-0011-os-convention-default-keymap.md))ため、terminal が `Cmd+←` → `Ctrl+A` のような「macOS 標準キーへの翻訳」を行っても期待どおり動作する(`Cmd+←/→` = 行頭/行末、`Opt+←/→` = 単語移動、`Ctrl+N/P` = 上下)。
+
+さらに `Cmd` キーを**本物の modifier として**届けたい場合(`Cmd+C` copy / `Cmd+A` select all 等)は、terminal 側の予約 keybind の解除が必要:
+
+```ini
+# Ghostty (~/.config/ghostty/config)
+keybind = super+arrow_left=unbind
+keybind = super+arrow_right=unbind
+keybind = super+a=unbind
+keybind = super+c=performable:copy_to_clipboard   # terminal 選択がない時だけ coda へ透過
+```
+
+- 解除の tradeoff: shell(zsh 等)でも `Cmd+←` の行頭ジャンプ翻訳が失われる
+- どのキーが届いているかの診断は `coda inspect-key`
+- terminal が key を消費・変換する理屈の詳細: [ADR-0007](docs/ADR-0007-modifier-delivery-strategy.md) / [TASK-260711-17](docs/TASK-260711-17-dogfood-2-ghostty-key-interception.md)
+
 ### 設定
 
 ```text
