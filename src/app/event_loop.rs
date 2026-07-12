@@ -13,8 +13,10 @@ use crate::{
     core::editor::{EditorCore, Motion},
     highlight::{HighlightEngine, ThemeChoice},
     input::{
-        BracketedPasteGuard, InputEvent, Key, KeyEvent, KeyboardProtocolGuard, Modifiers,
-        RawModeGuard, drain_input_events, flush_pending_escape,
+        BracketedPasteGuard, CapabilityDetection, CapabilityProbe, InputEvent, Key, KeyEvent,
+        KeyboardCapabilities, KeyboardProtocolGuard, Modifiers, RawModeGuard, drain_input_events,
+        flush_pending_escape,
+        quirks::{self, QuirkEffect, TerminalQuirk},
     },
     keymap::{EditorAction, EditorContext, ResolveResult, Resolver},
     ui::{
@@ -27,12 +29,20 @@ use super::{
     document::Document,
     editor_view::StatusLine,
     file,
+    inspector::{InspectorOverlay, draw_inspector, is_close_key},
     palette::{CommandPalette, filter_actions},
     search_overlay::{SearchOverlay, draw_search_overlay},
 };
 
 const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(800);
 const IDLE_POLL_MS: i32 = 100;
+/// Keyboard capability negotiation deadline (SPEC-0003 Open Question answer,
+/// design decision 260712): DA1 answering first resolves "legacy" sooner on
+/// terminals that support it, so this is a worst-case fallback, not the
+/// common-case latency.
+const CAPABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Startup warning shown once a legacy terminal is confirmed (TASK-260712-16).
+const LEGACY_CAPABILITY_WARNING: &str = "legacy terminal input: Ctrl+Shift+J / Shift+Enter etc. cannot be distinguished — run inspector.open for details";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum QuitDecision {
@@ -67,6 +77,7 @@ pub struct EventLoop {
     highlight_engine: HighlightEngine,
     palette: CommandPalette,
     search: SearchOverlay,
+    inspector: InspectorOverlay,
     message: String,
     clipboard: String,
     pending_terminal_write: Vec<u8>,
@@ -74,6 +85,19 @@ pub struct EventLoop {
     pending_since: Option<Instant>,
     quit_guard: QuitGuard,
     close_guard: QuitGuard,
+    /// Ghostty keybind interception quirks detected at startup (ADR-0007
+    /// decision 2(b)). Kept for the `:inspect-key` live mode (TASK-260711-17)
+    /// to annotate incoming events, not just for the one-line startup warning.
+    ghostty_quirks: Vec<TerminalQuirk>,
+    /// In-flight keyboard capability detection, armed by `run()` right after
+    /// the protocol push. `None` once resolved (or if never armed, as in
+    /// `EventLoop::open`/`open_many` used by tests without a real terminal)
+    /// — see `resolve_capabilities` (TASK-260712-16).
+    capability_probe: Option<CapabilityProbe>,
+    /// The resolved capability judgment, once known. `None` means detection
+    /// is still pending; surfaced to the `:inspect-key` overlay's protocol
+    /// line via `draw_inspector`.
+    capability_detection: Option<CapabilityDetection>,
 }
 
 impl EventLoop {
@@ -109,13 +133,31 @@ impl EventLoop {
         }
         let mut bindings = default_bindings::bindings();
         bindings.extend(user_bindings);
+        let resolver = Resolver::new(bindings);
+
+        // Query Ghostty's own keybind table before raw mode / the alt screen
+        // are entered (that happens later, in `run()`): `quirks::detect()`
+        // shells out to `ghostty +list-keybinds`, which requires the
+        // terminal to still be in its normal state. Any interception that
+        // would change behavior gets folded into `warnings` as a single
+        // summary line (ADR-0007 decision 2(b), TASK-260711-17).
+        let ghostty_quirks = quirks::detect();
+        if let Some(warning) = ghostty_intercept_warning(&ghostty_quirks, &resolver) {
+            // Front of the list, not the back: the status bar shows one line
+            // and config warnings can be numerous (one per broken binding),
+            // which would push this single aggregated summary out of view.
+            // Interim measure until a full warning viewer exists (backlog).
+            warnings.insert(0, warning);
+        }
+
         Ok(Self {
             documents,
             active: 0,
-            resolver: Resolver::new(bindings),
+            resolver,
             highlight_engine: HighlightEngine::new(theme),
             palette: CommandPalette::default(),
             search: SearchOverlay::default(),
+            inspector: InspectorOverlay::default(),
             message: warnings.join("; "),
             clipboard: String::new(),
             pending_terminal_write: Vec::new(),
@@ -123,7 +165,16 @@ impl EventLoop {
             pending_since: None,
             quit_guard: QuitGuard::default(),
             close_guard: QuitGuard::default(),
+            ghostty_quirks,
+            capability_probe: None,
+            capability_detection: None,
         })
+    }
+
+    /// Ghostty quirks detected at startup, for the `:inspect-key` live mode
+    /// to annotate incoming events against (TASK-260711-17).
+    pub(crate) fn ghostty_quirks(&self) -> &[TerminalQuirk] {
+        &self.ghostty_quirks
     }
 
     pub fn run(mut self) -> io::Result<()> {
@@ -136,6 +187,16 @@ impl EventLoop {
         // declaration) pops the protocol while still on the alt screen.
         let mut alt = AltScreenGuard::enter(stdout)?;
         let _keyboard = KeyboardProtocolGuard::push(alt.writer_mut())?;
+        // DA1 (Primary Device Attributes) is the fallback signal for
+        // terminals that don't understand `CSI ?u` at all: almost every
+        // terminal answers DA1, so its arrival (without a preceding
+        // `CapabilityReply`) proves "legacy" without waiting out the full
+        // timeout (SPEC-0003 detection design 260712).
+        alt.writer_mut().write_all(b"\x1b[c")?;
+        alt.writer_mut().flush()?;
+        self.capability_probe = Some(CapabilityProbe::arm(
+            Instant::now() + CAPABILITY_PROBE_TIMEOUT,
+        ));
         let _paste = BracketedPasteGuard::enable(alt.writer_mut())?;
         let mut stdin = io::stdin().lock();
         let mut byte_buffer = Vec::new();
@@ -163,6 +224,12 @@ impl EventLoop {
                     break;
                 }
                 byte_buffer.extend_from_slice(&chunk[..read]);
+                if self.inspector.visible {
+                    // Chunk-level approximation (design decision 260712):
+                    // attribute the whole read chunk to whichever event(s) it
+                    // decodes into rather than tracking exact byte spans.
+                    self.inspector.push_raw(&chunk[..read]);
+                }
                 for event in drain_input_events(&mut byte_buffer) {
                     if self.handle_input_event(event) == QuitDecision::Quit {
                         return Ok(());
@@ -179,6 +246,12 @@ impl EventLoop {
             if self.handle_sequence_timeout() == QuitDecision::Quit {
                 return Ok(());
             }
+
+            // Idle poll granularity (100ms) is fine grain enough for the
+            // 500ms capability deadline (SPEC-0003 Open Question answer);
+            // this is a no-op once `capability_probe` has resolved and been
+            // cleared.
+            self.tick_capability_probe();
 
             if take_pending_resize()
                 && let Some((width, height)) = terminal_size()
@@ -223,6 +296,9 @@ impl EventLoop {
         );
         let items = filter_actions(&self.palette.query, self.resolver.bindings());
         draw_search_overlay(screen, &self.search);
+        // Inspector before palette: when both are visible, the palette (its
+        // rescue entry point always wins per AGENTS.md) draws on top.
+        draw_inspector(screen, &self.inspector, self.capability_detection);
         super::palette::draw_palette(screen, &self.palette, &items);
     }
 
@@ -230,6 +306,53 @@ impl EventLoop {
         match event {
             InputEvent::Key(key) => self.handle_key(key),
             InputEvent::Paste(text) => self.handle_paste_input(&text),
+            InputEvent::CapabilityReply(_) | InputEvent::DeviceAttributes => {
+                self.feed_capability_probe(&event);
+                QuitDecision::Continue
+            }
+        }
+    }
+
+    /// Feeds a decoded capability-query reply to the in-flight probe, if
+    /// any. `capability_probe` only exists while detection is pending
+    /// (`run()` arms it right after the protocol push, `resolve_capabilities`
+    /// clears it), so this is a no-op once capabilities are known or when
+    /// running without a real terminal (tests via `EventLoop::open`).
+    fn feed_capability_probe(&mut self, event: &InputEvent) {
+        let Some(probe) = self.capability_probe.as_mut() else {
+            return;
+        };
+        if let Some(detection) = probe.on_event(event) {
+            self.resolve_capabilities(detection);
+        }
+    }
+
+    /// Called once per event-loop iteration so a probe that never receives a
+    /// reply (terminal ignores both queries entirely) still resolves after
+    /// its deadline instead of leaving capabilities undetected forever.
+    fn tick_capability_probe(&mut self) {
+        let Some(probe) = self.capability_probe.as_mut() else {
+            return;
+        };
+        if let Some(detection) = probe.on_tick(Instant::now()) {
+            self.resolve_capabilities(detection);
+        }
+    }
+
+    /// Records the resolved capability judgment and, for a legacy result,
+    /// prepends the startup warning to `self.message` — same "front of the
+    /// list" reasoning as `ghostty_intercept_warning` (TASK-260711-17): the
+    /// status bar shows one line, and this is a single fact the user needs
+    /// regardless of whatever else is already queued there.
+    fn resolve_capabilities(&mut self, detection: CapabilityDetection) {
+        self.capability_probe = None;
+        self.capability_detection = Some(detection);
+        if detection.capabilities() != KeyboardCapabilities::modern() {
+            self.message = if self.message.is_empty() {
+                LEGACY_CAPABILITY_WARNING.to_string()
+            } else {
+                format!("{LEGACY_CAPABILITY_WARNING}; {}", self.message)
+            };
         }
     }
 
@@ -253,6 +376,10 @@ impl EventLoop {
         let sanitized = text.replace('\n', "");
         if self.palette.visible {
             self.palette.push_text(&sanitized);
+        } else if self.inspector.visible {
+            // Observe-only: record that a paste happened without ever
+            // exposing its contents (design decision 260712).
+            self.inspector.record_paste(text.len());
         } else if self.search.visible {
             let editor = &mut self.documents[self.active].editor;
             self.search.paste_text(&sanitized, editor);
@@ -285,6 +412,10 @@ impl EventLoop {
             && let Some(decision) = self.handle_palette_key(&event)
         {
             return decision;
+        }
+
+        if self.inspector.visible {
+            return self.handle_inspector_key(event);
         }
 
         if self.search.visible
@@ -360,6 +491,25 @@ impl EventLoop {
             }
             _ => None,
         }
+    }
+
+    /// Handles a key while the inspector overlay is visible. This is the
+    /// enforcement point for "observation must never mutate editor state"
+    /// (TASK-260711-17): every key is either the close key or gets recorded,
+    /// never forwarded to the resolver/dispatch path.
+    fn handle_inspector_key(&mut self, event: KeyEvent) -> QuitDecision {
+        if is_close_key(&event) {
+            self.inspector.close();
+            return QuitDecision::Continue;
+        }
+        let context = self.context();
+        // `ghostty_quirks()` borrows `&self`, which cannot overlap with the
+        // `&mut self.inspector` borrow below, so its (small) result is
+        // cloned out first rather than passed through directly.
+        let quirks = self.ghostty_quirks().to_vec();
+        self.inspector
+            .record_key(&event, &self.resolver, &context, &quirks);
+        QuitDecision::Continue
     }
 
     fn handle_text_input(&mut self, event: KeyEvent) -> QuitDecision {
@@ -509,6 +659,11 @@ impl EventLoop {
             EditorAction::PaletteOpen => {
                 self.search.close();
                 self.palette.open();
+            }
+            EditorAction::InspectorOpen => {
+                self.search.close();
+                self.inspector.open();
+                self.message = "inspect-key: press any key".to_string();
             }
             EditorAction::SearchOpen => {
                 self.palette.close();
@@ -778,6 +933,79 @@ fn ellipsize(text: &str, width: usize) -> String {
     clipped
 }
 
+/// Cross-references detected Ghostty quirks against the resolver's active
+/// bindings and summarizes the ones worth warning about into one line.
+///
+/// A quirk is only worth mentioning if this program actually has a binding
+/// on the trigger chord (otherwise there is nothing to lose). For
+/// `Translated` quirks, the translated keystroke is resolved too: if it maps
+/// to the *same* action as the original trigger, the terminal's rewrite is
+/// harmless (this is exactly the ADR-0011 case — `cmd+left` arrives as
+/// `ctrl+a`, and the default table binds both to `cursor.lineStart`) and the
+/// quirk is not reported.
+fn ghostty_intercept_warning(quirks: &[TerminalQuirk], resolver: &Resolver) -> Option<String> {
+    // `EditorContext::default()` already has editor_focus/text_input_focus
+    // true, which is the representative context the design calls for.
+    let context = EditorContext::default();
+
+    let mut affected = Vec::new();
+    for quirk in quirks {
+        let Some(trigger_action) =
+            resolved_action(resolver, std::slice::from_ref(&quirk.trigger), &context)
+        else {
+            continue;
+        };
+
+        let warn = match &quirk.effect {
+            QuirkEffect::Consumed { .. } => true,
+            QuirkEffect::Translated { events, .. } => {
+                events.is_empty()
+                    || resolved_action(resolver, events, &context) != Some(trigger_action)
+            }
+        };
+
+        if warn {
+            affected.push(quirk.trigger.to_string());
+        }
+    }
+
+    format_intercept_warning(&affected)
+}
+
+/// Resolves a key sequence to a bound action, treating anything short of an
+/// exact `Matched` result (no binding, or a sequence prefix still pending) as
+/// "no action" for warning purposes.
+fn resolved_action(
+    resolver: &Resolver,
+    keys: &[KeyEvent],
+    context: &EditorContext,
+) -> Option<EditorAction> {
+    match resolver.resolve(keys, context) {
+        ResolveResult::Matched(action) => Some(action),
+        _ => None,
+    }
+}
+
+/// Formats the startup warning line, showing up to 3 example chords and
+/// truncating the rest with `…`. Returns `None` when nothing is affected.
+fn format_intercept_warning(affected: &[String]) -> Option<String> {
+    if affected.is_empty() {
+        return None;
+    }
+
+    let shown = affected
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if affected.len() > 3 { ", …" } else { "" };
+    Some(format!(
+        "Ghostty intercepts {} bindings: {shown}{suffix} — run inspector.open for details",
+        affected.len()
+    ))
+}
+
 fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut unique = Vec::new();
@@ -807,14 +1035,24 @@ fn format_candidates(candidates: &[(Vec<KeyEvent>, EditorAction)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventLoop, QuitDecision, QuitGuard, TabItem, draw_tab_bar};
+    use super::{
+        EventLoop, QuitDecision, QuitGuard, TabItem, draw_tab_bar, format_intercept_warning,
+        ghostty_intercept_warning,
+    };
     use crate::{
+        app::default_bindings::{Platform, bindings_for},
         highlight::ThemeChoice,
-        input::{InputEvent, Key, KeyEvent},
-        keymap::EditorAction,
+        input::{
+            CapabilityDetection, CapabilityProbe, InputEvent, Key, KeyEvent,
+            quirks::parse_ghostty_keybinds,
+        },
+        keymap::{EditorAction, Resolver},
         ui::Screen,
     };
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
 
     fn buffer_text(event_loop: &EventLoop) -> String {
         String::from_utf8(event_loop.editor().buffer.to_bytes()).unwrap()
@@ -861,6 +1099,55 @@ mod tests {
             QuitDecision::Quit,
             "palette app.quit on a clean buffer must quit"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn inspector_open_dispatch_shows_overlay_with_press_a_key_message() {
+        let path = temp_path("inspector-open");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        assert_eq!(
+            event_loop.dispatch(EditorAction::InspectorOpen),
+            QuitDecision::Continue
+        );
+        assert!(event_loop.inspector.visible);
+        assert_eq!(event_loop.message, "inspect-key: press any key");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn inspector_observes_keys_without_mutating_the_buffer_and_esc_resumes_editing() {
+        let path = temp_path("inspector-observe");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        event_loop.dispatch(EditorAction::InspectorOpen);
+        event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
+        assert_eq!(
+            buffer_text(&event_loop),
+            "abc",
+            "inspector must not forward keys to the editor"
+        );
+        assert!(event_loop.inspector.visible);
+
+        assert_eq!(
+            event_loop.handle_key(KeyEvent::plain(Key::Esc)),
+            QuitDecision::Continue
+        );
+        assert!(!event_loop.inspector.visible, "Esc closes the overlay");
+
+        event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
+        assert_eq!(
+            buffer_text(&event_loop),
+            "xabc",
+            "normal editing resumes once the overlay is closed"
+        );
+
         let _ = std::fs::remove_file(path);
     }
 
@@ -1148,6 +1435,88 @@ mod tests {
         assert_eq!(row_text(&narrow, 0), "1:very-long-file-na…");
     }
 
+    // Faithful to real `+list-keybinds` output: `text:` payloads carry a
+    // doubled backslash on the wire (see input/quirks.rs fixture note).
+    const GHOSTTY_FIXTURE: &str = "\
+keybind = super+arrow_right=text:\\\\x05
+keybind = super+arrow_left=text:\\\\x01
+keybind = alt+arrow_left=esc:b
+keybind = alt+arrow_right=esc:f
+keybind = super+c=copy_to_clipboard:mixed
+keybind = super+a=select_all
+keybind = super+f=start_search
+keybind = shift+arrow_left=adjust_selection:left
+keybind = super+shift+arrow_up=jump_to_prompt:-1
+keybind = super+1=goto_tab:1
+keybind = super+digit_1=goto_tab:1
+";
+
+    #[test]
+    fn ghostty_warning_suppresses_same_action_translation_but_flags_consumed_binds() {
+        let quirks = parse_ghostty_keybinds(GHOSTTY_FIXTURE);
+        let resolver = Resolver::new(bindings_for(Platform::MacOs));
+
+        let warning =
+            ghostty_intercept_warning(&quirks, &resolver).expect("some quirks are warn-worthy");
+
+        // cmd+left is translated to ^A, which resolves to the same
+        // cursor.lineStart action as the cmd+left default binding (ADR-0011)
+        // — the terminal rewrite is harmless, so it must not be reported.
+        assert!(
+            !warning.contains("Left"),
+            "cmd+left same-action translation must be suppressed: {warning}"
+        );
+        // cmd+f (start_search) and cmd+a (select_all) are consumed outright
+        // by Ghostty and coda has default bindings on both chords, so both
+        // must be flagged.
+        assert!(warning.contains('F'), "cmd+f must be flagged: {warning}");
+        assert!(warning.contains('A'), "cmd+a must be flagged: {warning}");
+    }
+
+    #[test]
+    fn ghostty_warning_is_none_when_no_quirks_hit_a_binding() {
+        let resolver = Resolver::new(bindings_for(Platform::MacOs));
+        assert_eq!(ghostty_intercept_warning(&[], &resolver), None);
+    }
+
+    #[test]
+    fn format_intercept_warning_is_none_for_empty_list() {
+        assert_eq!(format_intercept_warning(&[]), None);
+    }
+
+    #[test]
+    fn format_intercept_warning_lists_up_to_three_examples_without_truncation() {
+        let affected = vec![
+            "Cmd+A".to_string(),
+            "Cmd+F".to_string(),
+            "Cmd+W".to_string(),
+        ];
+        assert_eq!(
+            format_intercept_warning(&affected),
+            Some(
+                "Ghostty intercepts 3 bindings: Cmd+A, Cmd+F, Cmd+W — run inspector.open for details"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn format_intercept_warning_truncates_beyond_three_examples() {
+        let affected = vec![
+            "Cmd+A".to_string(),
+            "Cmd+F".to_string(),
+            "Cmd+W".to_string(),
+            "Cmd+C".to_string(),
+        ];
+        assert_eq!(
+            format_intercept_warning(&affected),
+            Some(
+                "Ghostty intercepts 4 bindings: Cmd+A, Cmd+F, Cmd+W, … — run inspector.open for details"
+                    .to_string()
+            )
+        );
+    }
+
     #[test]
     fn app_quit_warns_when_any_buffer_is_modified() {
         let first = temp_path("quit-a");
@@ -1181,5 +1550,130 @@ mod tests {
 
         let _ = std::fs::remove_file(first);
         let _ = std::fs::remove_file(second);
+    }
+
+    /// TASK-260712-16 testcases: capability resolution and the startup
+    /// warning it triggers. `EventLoop::open` never touches a real terminal,
+    /// so these arm/feed the probe manually rather than going through `run()`.
+
+    #[test]
+    fn modern_capability_reply_resolves_without_a_legacy_warning() {
+        let path = temp_path("capability-modern");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        // Startup `message` may already carry an unrelated warning (e.g. a
+        // real Ghostty quirk summary on a dev machine running this suite
+        // inside Ghostty, TASK-260711-17) — capture it instead of assuming
+        // empty, so this test only asserts what modern capability resolution
+        // itself is responsible for: not touching `message` at all.
+        let message_before = event_loop.message.clone();
+
+        event_loop.capability_probe = Some(CapabilityProbe::arm(
+            Instant::now() + Duration::from_millis(500),
+        ));
+        event_loop.handle_input_event(InputEvent::CapabilityReply(1));
+
+        assert_eq!(
+            event_loop.capability_detection,
+            Some(CapabilityDetection::KittyFlags(1))
+        );
+        assert!(
+            event_loop.capability_probe.is_none(),
+            "probe is cleared once resolved"
+        );
+        assert_eq!(
+            event_loop.message, message_before,
+            "modern detection must not warn"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_capability_detection_prepends_warning_to_empty_message() {
+        let path = temp_path("capability-legacy-empty");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.message.clear();
+
+        event_loop.capability_probe = Some(CapabilityProbe::arm(
+            Instant::now() + Duration::from_millis(500),
+        ));
+        event_loop.handle_input_event(InputEvent::DeviceAttributes);
+
+        assert_eq!(
+            event_loop.capability_detection,
+            Some(CapabilityDetection::LegacyDeviceAttributes)
+        );
+        assert_eq!(
+            event_loop.message,
+            "legacy terminal input: Ctrl+Shift+J / Shift+Enter etc. cannot be distinguished — run inspector.open for details"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_capability_detection_prepends_warning_before_existing_message() {
+        let path = temp_path("capability-legacy-existing");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.message = "new file".to_string();
+
+        event_loop.capability_probe = Some(CapabilityProbe::arm(
+            Instant::now() + Duration::from_millis(500),
+        ));
+        event_loop.handle_input_event(InputEvent::DeviceAttributes);
+
+        assert_eq!(
+            event_loop.message,
+            "legacy terminal input: Ctrl+Shift+J / Shift+Enter etc. cannot be distinguished — run inspector.open for details; new file"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn capability_probe_tick_resolves_legacy_after_the_deadline_passes() {
+        let path = temp_path("capability-timeout");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        // Deadline already in the past: the very next tick must resolve.
+        event_loop.capability_probe = Some(CapabilityProbe::arm(Instant::now()));
+        event_loop.tick_capability_probe();
+
+        assert_eq!(
+            event_loop.capability_detection,
+            Some(CapabilityDetection::LegacyTimeout)
+        );
+        assert!(event_loop.capability_probe.is_none());
+        assert!(event_loop.message.contains("legacy terminal input"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn capability_probe_tick_before_deadline_leaves_message_untouched() {
+        let path = temp_path("capability-pending");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.message.clear();
+
+        event_loop.capability_probe = Some(CapabilityProbe::arm(
+            Instant::now() + Duration::from_secs(60),
+        ));
+        event_loop.tick_capability_probe();
+
+        assert_eq!(event_loop.capability_detection, None, "still pending");
+        assert_eq!(event_loop.message, "");
+        assert!(event_loop.capability_probe.is_some());
+
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -5,14 +5,14 @@
 
 ## asis
 
-- TASK-01〜15 完了。MVP 受け入れ基準(SPEC-0001)のうち Editor / Keymap / Scope Control は全項目達成、Terminal Compatibility は「区別不能な binding の明示」のみ未達
-- 累計 121 unit tests。実装は全て fmt / clippy -D warnings / test グリーン
+- TASK-01〜17 + TASK-16 完了。**MVP 受け入れ基準(SPEC-0001)は全項目達成**(260712、TASK-16 で Terminal Compatibility の最終項目「区別不能な binding の明示」を充足)
+- 累計 170 unit tests。実装は全て fmt / clippy -D warnings / test グリーン
 
 ## tobo(優先度順)
 
 ### P0: MVP 完成に必要
 
-- [ ] ざっと動かしての違和感、諦めるかどうかの判定基準
+- [x] ざっと動かしての違和感、諦めるかどうかの判定基準(→ Go 判定・OS 慣行 default は ADR-0011 として実装済み。残作業は TASK-17/18/19 に分解済み)
     - cmd, option 系操作をどのように解決するか
         - option + ←→ で単語移動ができてない、cmd だけ無理ならまだしも「 tui, cui では使えないキーが多数ある」では、製品としてちょっと成り立たない
             - 結局、それぞれの開発者の「オレオレ使いやすいエディタ」にしかならない、別にそっちを目指して個人用にしたっていいけど、だったら lazyvim の無限カスタム地獄に行ったほうがまだまし
@@ -24,14 +24,9 @@
     - **判定(260711 調査。詳細は `docs/TASK-260711-17-*.md`)**: 「使えないキーが多数」は誤認で、実態は 3 層 — (1) terminal keybind による消費(設定で解除可能)、(2) 別キーへの変換(`cmd+←`→`^A` 等。**変換先は macOS 標準の emacs 系キーなので coda の default を macOS 慣行に合わせれば設定ゼロで吸収できる**)、(3) legacy terminal の protocol 表現力不足(super 不達。`--cmd=ctrl` の退路設計済み = ADR-0007)。原理的に回避不能なのは (3) の環境の super のみ → **製品は成立する(Go)。ただし TASK-17 の macOS 慣行 default + 明文化を P0 扱いで先行する**
         - 各項目の行き先: cmd/option/ctrl+n,p → TASK-17 / ファイルなし起動・config open・Shift+Tab → TASK-19(`docs/TASK-260711-19-*.md`)
 
-- [ ] **TASK-17: Ghostty key 横取り対応と「届かない key」の明文化**(2nd dogfood。`docs/TASK-260711-17-*.md`。macOS 慣行 default(要 ADR)・alt+b/f 追加・quirk 実行時照会・inspect-key live mode。P1「inspect-key palette 統合」を吸収。上記判定により P0 昇格)
+- [x] **TASK-17: Ghostty key 横取り対応と「届かない key」の明文化**(2nd dogfood。`docs/TASK-260711-17-*.md`。ADR-0011 の OS 慣行 default・alt+b/f 追加・quirk 実行時照会・inspector.open live mode まで全て実装済み。P1「inspect-key palette 統合」を吸収)
 
-- [ ] **TASK-16: keyboard capability 検出の結線**(SPEC-0003 / ADR-0003)
-    - 起動時の `CSI ?u` 応答を parse して `KeyboardCapabilities` を確定(現状は push して応答を Unknown 扱いで捨てている)
-    - fallback terminal での起動時 warning(`Ctrl+J と Ctrl+Shift+J を区別できません` 等)
-    - importer へ capability を渡し `Disabled by terminal capability` を実分類化(現状は常に 0)
-    - `inspect-key` に判定結果を表示
-    - これで SPEC-0001 受け入れ基準が全て埋まる
+- [x] **TASK-16: keyboard capability 検出の結線**(SPEC-0003 / ADR-0003。`docs/TASK-260712-16-*.md`。`CSI ?u` 応答 + DA1 fallback + timeout 500ms で `KeyboardCapabilities` を確定、legacy warning・importer の Disabled 実分類・inspect-key の protocol 行まで結線。**SPEC-0001 受け入れ基準はこれで全達成**)
 
 ### P1: 実用上早めに欲しい
 
@@ -40,7 +35,7 @@
 - [ ] **Save As**(`file.saveAs`。palette からのパス入力 UI が必要 → 汎用の 1 行入力 prompt を作る)
 - [ ] **外部変更検知**(SPEC-0001 File Operations: save 時に mtime 比較で警告。watch は不要)
 - [ ] **large file protection の app 結線**(SPEC-0001 / ADR-0009: 10MB 超を read-only で開く + `isReadonly` context の実運用)
-- [ ] **`:which-key` / `:inspect-key` の palette 統合**(SPEC-0002 Binding inspection。editor 内から binding の由来を確認する導線)
+- [ ] **`:which-key` の palette 統合**(SPEC-0002 Binding inspection。`:inspect-key` 側は TASK-17 の `inspector.open` として実装済み。which-key = 「押しかけの prefix から続きの候補一覧」のみ残)
 - [ ] **config.toml の残項目結線**(`sequence_timeout_ms` / `palette_key` / `capability_warning`。SPEC-0005 に定義済みで未結線)
 - [ ] **import の `--cmd=keep|ctrl|both` オプション**(ADR-0007 決定 3。super が届かない環境の退路)
 

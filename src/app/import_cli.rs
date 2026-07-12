@@ -6,9 +6,18 @@
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
-use crate::keymap::{VsCodeImportError, import_vscode_keybindings, render_generated_bindings};
+use crate::{
+    input::{CapabilityDetection, probe_blocking},
+    keymap::{VsCodeImportError, import_vscode_keybindings, render_generated_bindings},
+};
+
+/// How long the CLI blocks a TTY stdin for a capability-query reply before
+/// falling back to legacy (mirrors the event loop's own deadline, SPEC-0003
+/// design decision 260712).
+const CAPABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ImportOptions {
@@ -35,18 +44,31 @@ pub(crate) fn run_vscode_import_in_base(
 ) -> Result<ImportOutput, String> {
     let input = fs::read_to_string(&options.path)
         .map_err(|error| format!("{}: {error}", options.path.display()))?;
-    let imported = import_vscode_keybindings(&input).map_err(|error| match error {
-        VsCodeImportError::InvalidJson(detail) => {
-            format!("invalid VS Code keybindings JSON: {detail}")
-        }
-        VsCodeImportError::RootNotArray => "VS Code keybindings root must be an array".to_string(),
-    })?;
+
+    // Detect once per invocation (TASK-260712-16): a piped/CI stdin cannot
+    // answer an escape-sequence query at all, so `probe_blocking` assumes
+    // modern there rather than spending the full timeout discovering nothing
+    // and then silently disabling every super/shift-enter/ctrl-enter binding
+    // on every non-interactive run.
+    let detection = probe_blocking(CAPABILITY_PROBE_TIMEOUT);
+    let capabilities = detection.capabilities();
+    let imported =
+        import_vscode_keybindings(&input, &capabilities).map_err(|error| match error {
+            VsCodeImportError::InvalidJson(detail) => {
+                format!("invalid VS Code keybindings JSON: {detail}")
+            }
+            VsCodeImportError::RootNotArray => {
+                "VS Code keybindings root must be an array".to_string()
+            }
+        })?;
 
     let generated_path = base_dir.join("generated").join("vscode-bindings.json");
     let report_path = base_dir
         .join("import-reports")
         .join("latest-vscode-import.txt");
-    let report_text = imported.report.render_text();
+    let capability_line = capability_report_line(detection);
+    let report_body = imported.report.render_text();
+    let report_text = format!("{capability_line}\n\n{report_body}");
 
     if !options.dry_run {
         // generated/ is importer-owned output; re-import is the normal
@@ -62,7 +84,7 @@ pub(crate) fn run_vscode_import_in_base(
 
     let summary = imported.report.summary();
     let mut stdout = format!(
-        "VS Code keybinding import completed.\nImported: {}\nIgnored: {}\nUnsupported commands: {}\nUnsupported conditions: {}\nInvalid keys: {}\nConflicts: {}\nDisabled by terminal capability: {}\n",
+        "{capability_line}\nVS Code keybinding import completed.\nImported: {}\nIgnored: {}\nUnsupported commands: {}\nUnsupported conditions: {}\nInvalid keys: {}\nConflicts: {}\nDisabled by terminal capability: {}\n",
         summary.imported,
         summary.ignored,
         summary.unsupported_commands,
@@ -73,7 +95,7 @@ pub(crate) fn run_vscode_import_in_base(
     );
     if options.print_report {
         stdout.push('\n');
-        stdout.push_str(&report_text);
+        stdout.push_str(&report_body);
     }
 
     Ok(ImportOutput {
@@ -81,6 +103,24 @@ pub(crate) fn run_vscode_import_in_base(
         generated_path,
         report_path,
     })
+}
+
+/// Formats the CLI's single capability summary line (TASK-260712-16). This
+/// is intentionally coarser than `CapabilityDetection::description` (used by
+/// the in-editor inspector): the CLI only needs "modern / legacy / not
+/// detected", not which of the two legacy sub-reasons (DA1-first vs.
+/// timeout) applied.
+fn capability_report_line(detection: CapabilityDetection) -> String {
+    match detection {
+        CapabilityDetection::KittyFlags(flags) if flags & 1 != 0 => {
+            format!("Terminal capability: modern (kitty CSI u, flags={flags})")
+        }
+        CapabilityDetection::AssumedModern => {
+            "Terminal capability: not detected (not an interactive terminal); assuming modern"
+                .to_string()
+        }
+        _ => "Terminal capability: legacy (no CSI ?u reply)".to_string(),
+    }
 }
 
 pub(crate) fn config_base_dir() -> Option<PathBuf> {
@@ -156,6 +196,53 @@ mod tests {
 
         let generated = fs::read_to_string(base.join("generated/vscode-bindings.json")).unwrap();
         assert!(generated.contains("cursor.down"), "{generated}");
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// TASK-260712-16: the CLI's stdin under `cargo test` is not a TTY, so
+    /// `probe_blocking` takes the fast `AssumedModern` path — this asserts
+    /// the exact wording that path produces shows up at the top of both
+    /// stdout and the written report file, without needing a real terminal.
+    #[test]
+    fn stdout_and_report_file_lead_with_the_terminal_capability_line() {
+        let temp = std::env::temp_dir().join(format!(
+            "coda-import-capability-line-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        let base = temp.join("config");
+        let input_path = temp.join("keybindings.json");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            &input_path,
+            r#"[{ "key": "ctrl+j", "command": "cursorDown", "when": "editorFocus" }]"#,
+        )
+        .unwrap();
+
+        let output = run_vscode_import_in_base(
+            &ImportOptions {
+                path: input_path,
+                dry_run: false,
+                print_report: false,
+            },
+            &base,
+        )
+        .unwrap();
+
+        const EXPECTED_LINE: &str =
+            "Terminal capability: not detected (not an interactive terminal); assuming modern";
+        assert!(
+            output.stdout.starts_with(EXPECTED_LINE),
+            "{}",
+            output.stdout
+        );
+        let report = fs::read_to_string(&output.report_path).unwrap();
+        assert!(report.starts_with(EXPECTED_LINE), "{report}");
+        assert!(
+            report.contains("Disabled by terminal capability: 0"),
+            "{report}"
+        );
+
         fs::remove_dir_all(&temp).unwrap();
     }
 }

@@ -18,6 +18,15 @@ pub enum DecodeResult {
 pub enum InputEvent {
     Key(KeyEvent),
     Paste(String),
+    /// Reply to our startup `CSI ?u` flags query (TASK-260712-16). Carries the
+    /// raw kitty flags bitmask; capability interpretation (bit 0 = disambiguate)
+    /// lives in `input::capabilities`, not here.
+    CapabilityReply(u16),
+    /// Reply to our startup `CSI c` (Primary Device Attributes) query. Its
+    /// mere presence — without a preceding `CapabilityReply` — is the DA1
+    /// fallback signal that a terminal does not understand kitty CSI u at all
+    /// (SPEC-0003 detection design 260712).
+    DeviceAttributes,
 }
 
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -45,7 +54,15 @@ pub fn drain_key_events(buffer: &mut Vec<u8>) -> Vec<KeyEvent> {
         .into_iter()
         .filter_map(|event| match event {
             InputEvent::Key(key) => Some(key),
-            InputEvent::Paste(_) => None,
+            // Capability query replies are not keystrokes; leaking them here
+            // as `Key::Unknown` would make the resolver, importer, and
+            // `inspect-key` all see a phantom keypress every time the
+            // terminal answers our startup probe (TASK-260712-16). The
+            // exhaustive match keeps this filter honest as new event kinds
+            // are added.
+            InputEvent::Paste(_)
+            | InputEvent::CapabilityReply(_)
+            | InputEvent::DeviceAttributes => None,
         })
         .collect()
 }
@@ -77,7 +94,7 @@ pub fn drain_input_events(buffer: &mut Vec<u8>) -> Vec<InputEvent> {
 
         match decode_one(remaining) {
             One::Event(event, consumed) => {
-                events.push(InputEvent::Key(event));
+                events.push(event);
                 offset += consumed;
             }
             One::Incomplete => break,
@@ -117,8 +134,15 @@ fn normalize_paste_text(bytes: &[u8]) -> String {
 }
 
 enum One {
-    Event(KeyEvent, usize),
+    Event(InputEvent, usize),
     Incomplete,
+}
+
+/// Wraps a decoded `KeyEvent` as `One::Event` — the common case for every
+/// branch below except capability query replies (`decode_capability_query`),
+/// which are not keystrokes.
+fn key_event(event: KeyEvent, consumed: usize) -> One {
+    One::Event(InputEvent::Key(event), consumed)
 }
 
 fn decode_one(bytes: &[u8]) -> One {
@@ -126,20 +150,20 @@ fn decode_one(bytes: &[u8]) -> One {
         // NUL is what legacy terminals send for Ctrl+Space (and Ctrl+@).
         // Without this arm it would fall into the UTF-8 branch and either
         // stall as Incomplete or swallow the following byte.
-        0x00 => One::Event(KeyEvent::new(Key::Char(' '), Modifiers::ctrl()), 1),
+        0x00 => key_event(KeyEvent::new(Key::Char(' '), Modifiers::ctrl()), 1),
         0x01..=0x08 | 0x0b..=0x0c | 0x0e..=0x1a => decode_c0_control(bytes[0]),
-        b'\t' => One::Event(KeyEvent::plain(Key::Tab), 1),
-        b'\r' | b'\n' => One::Event(KeyEvent::plain(Key::Enter), 1),
+        b'\t' => key_event(KeyEvent::plain(Key::Tab), 1),
+        b'\r' | b'\n' => key_event(KeyEvent::plain(Key::Enter), 1),
         0x1b => decode_escape(bytes),
-        0x7f => One::Event(KeyEvent::plain(Key::Backspace), 1),
-        0x20..=0x7e => One::Event(KeyEvent::plain(Key::Char(char::from(bytes[0]))), 1),
+        0x7f => key_event(KeyEvent::plain(Key::Backspace), 1),
+        0x20..=0x7e => key_event(KeyEvent::plain(Key::Char(char::from(bytes[0]))), 1),
         _ => decode_utf8_or_unknown(bytes),
     }
 }
 
 fn decode_c0_control(byte: u8) -> One {
     let character = char::from(b'a' + byte - 1);
-    One::Event(KeyEvent::new(Key::Char(character), Modifiers::ctrl()), 1)
+    key_event(KeyEvent::new(Key::Char(character), Modifiers::ctrl()), 1)
 }
 
 fn decode_escape(bytes: &[u8]) -> One {
@@ -151,10 +175,15 @@ fn decode_escape(bytes: &[u8]) -> One {
         b'[' => decode_csi(bytes),
         b'O' => decode_ss3(bytes),
         _ => match decode_one(&bytes[1..]) {
-            One::Event(mut event, consumed) => {
+            One::Event(InputEvent::Key(mut event), consumed) => {
                 event.modifiers = event.modifiers.with_alt();
-                One::Event(event, consumed + 1)
+                key_event(event, consumed + 1)
             }
+            // Alt-prefixed capability replies are not a real terminal output
+            // (query responses are never "alt-pressed"), but the match must
+            // stay exhaustive; pass the event through unmodified instead of
+            // asserting an unreachable case.
+            One::Event(other, consumed) => One::Event(other, consumed + 1),
             One::Incomplete => One::Incomplete,
         },
     }
@@ -172,20 +201,61 @@ fn decode_csi(bytes: &[u8]) -> One {
             let params = &bytes[2..final_index];
             let consumed = final_index + 1;
 
+            // `?`-prefixed params mark a private-mode reply. The only ones we
+            // ever provoke are our own startup capability queries (`CSI ?u`
+            // flags, `CSI c` DA1 — DA1 replies are also `?`-prefixed), so
+            // route those to the capability decoder instead of the ordinary
+            // key paths below (TASK-260712-16).
+            if let Some(query_params) = params.strip_prefix(b"?") {
+                return decode_capability_query(query_params, final_byte, bytes, consumed);
+            }
+
             if final_byte == b'u' {
                 return decode_kitty_csi_u(params, bytes, consumed);
             }
 
             if let Some(event) = decode_legacy_csi(params, final_byte) {
-                One::Event(event, consumed)
+                key_event(event, consumed)
             } else {
-                One::Event(
+                key_event(
                     KeyEvent::plain(Key::Unknown(bytes[..consumed].to_vec())),
                     consumed,
                 )
             }
         }
         None => One::Incomplete,
+    }
+}
+
+/// Decodes replies to our startup capability queries. These are query
+/// *responses*, not key presses, so they must never leak into
+/// `drain_key_events` as `Key::Unknown` — the importer and resolver would
+/// otherwise see a phantom keystroke every time the terminal answers a probe.
+/// Any other `?`-prefixed CSI (a private mode report we did not ask for)
+/// falls back to `Key::Unknown`, unchanged from before this function existed.
+fn decode_capability_query(
+    query_params: &[u8],
+    final_byte: u8,
+    bytes: &[u8],
+    consumed: usize,
+) -> One {
+    match final_byte {
+        b'u' => {
+            // An unparseable or empty flags value is treated as "no flags
+            // set" (0) rather than falling back to Unknown: it is still
+            // unambiguously a capability reply, just one we conservatively
+            // read as legacy (bit 0 unset).
+            let flags = std::str::from_utf8(query_params)
+                .ok()
+                .and_then(|text| text.parse::<u16>().ok())
+                .unwrap_or(0);
+            One::Event(InputEvent::CapabilityReply(flags), consumed)
+        }
+        b'c' => One::Event(InputEvent::DeviceAttributes, consumed),
+        _ => key_event(
+            KeyEvent::plain(Key::Unknown(bytes[..consumed].to_vec())),
+            consumed,
+        ),
     }
 }
 
@@ -253,7 +323,7 @@ fn decode_ss3(bytes: &[u8]) -> One {
         _ => Key::Unknown(bytes[..3].to_vec()),
     };
 
-    One::Event(KeyEvent::plain(key), 3)
+    key_event(KeyEvent::plain(key), 3)
 }
 
 fn decode_kitty_csi_u(params: &[u8], bytes: &[u8], consumed: usize) -> One {
@@ -261,14 +331,14 @@ fn decode_kitty_csi_u(params: &[u8], bytes: &[u8], consumed: usize) -> One {
         .ok()
         .and_then(parse_semicolon_numbers)
     else {
-        return One::Event(
+        return key_event(
             KeyEvent::plain(Key::Unknown(bytes[..consumed].to_vec())),
             consumed,
         );
     };
 
     let Some(codepoint) = values.first().copied() else {
-        return One::Event(
+        return key_event(
             KeyEvent::plain(Key::Unknown(bytes[..consumed].to_vec())),
             consumed,
         );
@@ -291,7 +361,7 @@ fn decode_kitty_csi_u(params: &[u8], bytes: &[u8], consumed: usize) -> One {
         ),
     };
 
-    One::Event(KeyEvent::new(key, modifiers), consumed)
+    key_event(KeyEvent::new(key, modifiers), consumed)
 }
 
 fn decode_utf8_or_unknown(bytes: &[u8]) -> One {
@@ -302,11 +372,11 @@ fn decode_utf8_or_unknown(bytes: &[u8]) -> One {
         if let Ok(text) = std::str::from_utf8(&bytes[..width])
             && let Some(character) = text.chars().next()
         {
-            return One::Event(KeyEvent::plain(Key::Char(character)), width);
+            return key_event(KeyEvent::plain(Key::Char(character)), width);
         }
     }
 
-    One::Event(KeyEvent::plain(Key::Unknown(vec![bytes[0]])), 1)
+    key_event(KeyEvent::plain(Key::Unknown(vec![bytes[0]])), 1)
 }
 
 fn parse_semicolon_numbers(text: &str) -> Option<Vec<u16>> {
@@ -447,11 +517,83 @@ mod tests {
                 b"\x1b[999z",
                 complete([KeyEvent::plain(Key::Unknown(b"\x1b[999z".to_vec()))]),
             ),
+            (
+                // A `?`-prefixed CSI we did not ask for (not a `u` or `c`
+                // reply to our own queries) must fall back to Unknown exactly
+                // like before capability replies existed (TASK-260712-16).
+                "unparseable ? CSI stays Key::Unknown",
+                b"\x1b[?25h",
+                complete([KeyEvent::plain(Key::Unknown(b"\x1b[?25h".to_vec()))]),
+            ),
         ];
 
         for (name, input, expected) in cases {
             assert_eq!(decode_key_events(input), *expected, "{name}");
         }
+    }
+
+    /// Table-driven per TASK-260712-16 testcases: our startup `CSI ?u` /
+    /// `CSI c` queries must decode to `InputEvent::CapabilityReply` /
+    /// `InputEvent::DeviceAttributes`, mix cleanly with surrounding key
+    /// events in the same chunk, and never surface through
+    /// `drain_key_events` (covered separately below).
+    #[test]
+    fn decode_capability_query_replies_table_driven() {
+        let cases: &[(&str, &[u8], Vec<InputEvent>)] = &[
+            (
+                "kitty flags reply, disambiguate bit set",
+                b"\x1b[?1u",
+                vec![InputEvent::CapabilityReply(1)],
+            ),
+            (
+                "kitty flags reply, no flags set",
+                b"\x1b[?0u",
+                vec![InputEvent::CapabilityReply(0)],
+            ),
+            (
+                "DA1 reply",
+                b"\x1b[?62;22c",
+                vec![InputEvent::DeviceAttributes],
+            ),
+            (
+                "capability reply mixed with a following key in one chunk",
+                b"\x1b[?1ua",
+                vec![
+                    InputEvent::CapabilityReply(1),
+                    InputEvent::Key(KeyEvent::plain(Key::Char('a'))),
+                ],
+            ),
+        ];
+
+        for (name, input, expected) in cases {
+            let mut buffer = input.to_vec();
+            assert_eq!(&drain_input_events(&mut buffer), expected, "{name}");
+            assert!(buffer.is_empty(), "{name}: buffer not fully drained");
+        }
+    }
+
+    #[test]
+    fn drain_key_events_does_not_leak_capability_or_device_attribute_replies() {
+        let mut buffer = b"\x1b[?1u\x1b[?62;22ca".to_vec();
+        assert_eq!(
+            drain_key_events(&mut buffer),
+            vec![KeyEvent::plain(Key::Char('a'))],
+            "only the trailing 'a' is a real keystroke"
+        );
+    }
+
+    #[test]
+    fn split_capability_reply_arrival_waits_for_the_final_byte() {
+        let mut buffer = b"\x1b[?1".to_vec();
+        assert_eq!(drain_input_events(&mut buffer), Vec::new());
+        assert_eq!(buffer, b"\x1b[?1", "incomplete prefix must stay buffered");
+
+        buffer.extend_from_slice(b"u");
+        assert_eq!(
+            drain_input_events(&mut buffer),
+            vec![InputEvent::CapabilityReply(1)]
+        );
+        assert!(buffer.is_empty());
     }
 
     #[test]

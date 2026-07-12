@@ -8,6 +8,7 @@ mod editor_view;
 mod event_loop;
 mod file;
 mod import_cli;
+mod inspector;
 mod palette;
 mod search_overlay;
 

@@ -110,10 +110,11 @@ Resolved action: selection.cursorDown
 
 ## Open Questions
 
-- negotiation timeout の値
-- `$TMUX` 検出時に保守的 capability へ自動で倒すか(ADR-0003 Open Questions)
+- ~~negotiation timeout の値~~ → 500ms + DA1 fallback(TASK-260712-16。ADR-0003 Open Questions 参照)
+- ~~`$TMUX` 検出時に保守的 capability へ自動で倒すか(ADR-0003 Open Questions)~~ → 特別扱いしない(同上)
 - fallback mode で `Esc` 単押しと escape sequence 先頭の区別に使う待ち時間(ESC timeout)
 
 ## Progress
 
 - 2026-07-05: 初版。
+- 2026-07-12: capability detection を実装(TASK-260712-16)。検出方式は `CSI ?u` 応答 + DA1(`CSI c`)fallback。fallback mode の起動時 warning、importer の `Disabled by terminal capability` 分類、inspector(overlay / CLI)の protocol 表示まで結線。

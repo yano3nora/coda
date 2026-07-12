@@ -11,7 +11,10 @@ pub struct ImportReport {
     pub unsupported_conditions: Vec<ReportEntry>,
     pub invalid_keys: Vec<ReportEntry>,
     pub conflicts: Vec<ReportEntry>,
-    // TODO(SPEC-0003): wire terminal capability detection into the importer.
+    /// Chords the importer classified as undeliverable on the detected
+    /// `KeyboardCapabilities` (SPEC-0003 / TASK-260712-16) — e.g. Cmd/Super
+    /// on a terminal without modifier delivery, or Ctrl+Shift+<char> on a
+    /// terminal that cannot distinguish it from plain Ctrl+<char>.
     pub disabled_by_terminal_capability: Vec<ReportEntry>,
 }
 

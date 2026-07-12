@@ -4,12 +4,17 @@
 //! APIs directly. Raw bytes are decoded into normalized key events before any
 //! future keymap resolver sees them.
 
+mod capabilities;
 mod decoder;
 mod key_event;
+pub mod quirks;
 pub(crate) mod raw_terminal;
 
 use std::io::{self, Read, Write};
 
+pub use capabilities::{
+    CapabilityDetection, CapabilityProbe, KeyboardCapabilities, probe_blocking,
+};
 pub use decoder::{
     DecodeResult, InputEvent, decode_key_events, drain_input_events, drain_key_events,
     flush_pending_escape,
@@ -129,19 +134,57 @@ fn write_raw_line(stdout: &mut impl Write, line: &str) -> io::Result<()> {
 
 fn format_inspect_chunk(chunk: &[u8]) -> Vec<String> {
     let mut lines = vec![format!("Raw bytes: {}", escape_bytes(chunk))];
-    match decode_key_events(chunk) {
-        DecodeResult::Complete(events) => {
-            let pressed = events
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(format!("Pressed:   {pressed}"));
+    let mut pending = chunk.to_vec();
+    let events = drain_input_events(&mut pending);
+
+    if pending.is_empty() {
+        // Keystrokes still get their own comma-joined "Pressed:" line
+        // (unchanged from before capability replies existed), but only when
+        // the chunk actually decoded to at least one key — a chunk that is
+        // purely a capability-query reply has nothing to report as
+        // "pressed".
+        let pressed = events
+            .iter()
+            .filter_map(|event| match event {
+                InputEvent::Key(key) => Some(key.to_string()),
+                InputEvent::Paste(_)
+                | InputEvent::CapabilityReply(_)
+                | InputEvent::DeviceAttributes => None,
+            })
+            .collect::<Vec<_>>();
+        if !pressed.is_empty() || events.is_empty() {
+            lines.push(format!("Pressed:   {}", pressed.join(", ")));
         }
-        DecodeResult::Incomplete => lines.push("Pressed:   <incomplete sequence>".to_string()),
+        for event in &events {
+            if let Some(protocol_line) = format_protocol_line(event) {
+                lines.push(protocol_line);
+            }
+        }
+    } else {
+        lines.push("Pressed:   <incomplete sequence>".to_string());
     }
+
     lines.push(format!("Hex:       {}", hex_bytes(chunk)));
     lines
+}
+
+/// Renders our startup capability-query replies (`CSI ?u` flags / DA1) as a
+/// friendly `Protocol:` line for the raw input inspector, instead of letting
+/// them silently vanish as filtered-out non-key events.
+fn format_protocol_line(event: &InputEvent) -> Option<String> {
+    match event {
+        InputEvent::CapabilityReply(flags) if flags & 1 != 0 => Some(format!(
+            "Protocol:  kitty keyboard protocol supported (flags={flags})"
+        )),
+        InputEvent::CapabilityReply(flags) => Some(format!(
+            "Protocol:  kitty CSI u replied without the disambiguate flag (flags={flags}) — treated as legacy"
+        )),
+        InputEvent::DeviceAttributes => Some(
+            "Protocol:  primary device attributes received (no kitty CSI u reply — legacy terminal)"
+                .to_string(),
+        ),
+        InputEvent::Key(_) | InputEvent::Paste(_) => None,
+    }
 }
 
 fn hex_bytes(chunk: &[u8]) -> String {
@@ -211,6 +254,31 @@ mod tests {
                 r"Raw bytes: \x1b[106;6u".to_string(),
                 "Pressed:   Ctrl+Shift+J".to_string(),
                 "Hex:       0x1b 0x5b 0x31 0x30 0x36 0x3b 0x36 0x75".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_inspect_chunk_shows_friendly_line_for_kitty_flags_reply() {
+        assert_eq!(
+            format_inspect_chunk(b"\x1b[?1u"),
+            vec![
+                r"Raw bytes: \x1b[?1u".to_string(),
+                "Protocol:  kitty keyboard protocol supported (flags=1)".to_string(),
+                "Hex:       0x1b 0x5b 0x3f 0x31 0x75".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_inspect_chunk_shows_friendly_line_for_da1_reply() {
+        assert_eq!(
+            format_inspect_chunk(b"\x1b[?62;22c"),
+            vec![
+                r"Raw bytes: \x1b[?62;22c".to_string(),
+                "Protocol:  primary device attributes received (no kitty CSI u reply — legacy terminal)"
+                    .to_string(),
+                "Hex:       0x1b 0x5b 0x3f 0x36 0x32 0x3b 0x32 0x32 0x63".to_string(),
             ]
         );
     }

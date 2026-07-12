@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::input::{Key, KeyEvent};
+use crate::input::{Key, KeyEvent, KeyboardCapabilities};
 
 use super::{
     Binding, ContextPredicate, EditorAction, ImportReport, ReportEntry, Source,
@@ -22,7 +22,10 @@ pub enum VsCodeImportError {
     RootNotArray,
 }
 
-pub fn import_vscode_keybindings(text: &str) -> Result<VsCodeImport, VsCodeImportError> {
+pub fn import_vscode_keybindings(
+    text: &str,
+    capabilities: &KeyboardCapabilities,
+) -> Result<VsCodeImport, VsCodeImportError> {
     let stripped = strip_jsonc_comments(text);
     let value: Value = serde_json::from_str(&stripped)
         .map_err(|error| VsCodeImportError::InvalidJson(error.to_string()))?;
@@ -32,7 +35,7 @@ pub fn import_vscode_keybindings(text: &str) -> Result<VsCodeImport, VsCodeImpor
     let mut report = ImportReport::default();
 
     for entry in entries {
-        classify_entry(entry, &mut bindings, &mut report);
+        classify_entry(entry, &mut bindings, &mut report, capabilities);
     }
 
     debug_assert_eq!(entries.len(), report.total_classified());
@@ -68,7 +71,12 @@ pub fn format_key_for_config(keys: &[KeyEvent]) -> String {
         .join(" ")
 }
 
-fn classify_entry(entry: &Value, bindings: &mut Vec<Binding>, report: &mut ImportReport) {
+fn classify_entry(
+    entry: &Value,
+    bindings: &mut Vec<Binding>,
+    report: &mut ImportReport,
+    capabilities: &KeyboardCapabilities,
+) {
     let key = string_field(entry, "key").map(ToOwned::to_owned);
     let command = string_field(entry, "command").map(ToOwned::to_owned);
     let when = string_field(entry, "when").map(ToOwned::to_owned);
@@ -142,6 +150,19 @@ fn classify_entry(entry: &Value, bindings: &mut Vec<Binding>, report: &mut Impor
         None => None,
     };
 
+    // Chord-level deliverability check (SPEC-0003 / TASK-260712-16): a
+    // sequence can't be "half" pressed, so any single undeliverable chord
+    // disables the whole binding. Checked after key/when parsing succeeded
+    // (an entry that already failed those never reaches here) and before
+    // conflict detection, so a capability-disabled entry is never treated as
+    // a "previous" binding a later import could overwrite.
+    if let Some(reason) = sequence_disable_reason(&parsed_keys, capabilities) {
+        report
+            .disabled_by_terminal_capability
+            .push(ReportEntry::new(key, command, when, reason));
+        return;
+    }
+
     if let Some(existing_index) = bindings
         .iter()
         .position(|binding| binding.keys == parsed_keys && binding.when == parsed_when)
@@ -174,6 +195,56 @@ fn remove_imported_report_entry(report: &mut ImportReport, previous: &Binding) {
     }) {
         report.imported.remove(index);
     }
+}
+
+/// Finds the first chord in a key sequence this terminal cannot deliver, per
+/// the four SPEC-0003 rules (checked in the order TASK-260712-16 lists
+/// them). `None` means every chord in the sequence is deliverable.
+fn sequence_disable_reason(
+    keys: &[KeyEvent],
+    capabilities: &KeyboardCapabilities,
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| capability_disable_reason(key, capabilities))
+}
+
+/// Explains why a single chord is undeliverable on `capabilities`, or `None`
+/// if it is fine. Arrow / Home / End / etc. special keys are intentionally
+/// excluded from the Ctrl+Shift rule: legacy CSI sequences (`CSI 1;6C` etc.)
+/// carry a numeric modifier field that already distinguishes Ctrl from
+/// Ctrl+Shift for those keys, unlike plain characters which rely on kitty
+/// CSI u — so `Ctrl+Shift+Right` is never disabled by terminal capability
+/// (TASK-260712-16 note). The `Key::Char` guard on that rule is what
+/// achieves the exclusion; no extra special-casing is needed.
+fn capability_disable_reason(
+    key: &KeyEvent,
+    capabilities: &KeyboardCapabilities,
+) -> Option<String> {
+    if key.modifiers.contains_super() && !capabilities.supports_modified_keys {
+        return Some("terminal cannot deliver Cmd/Super".to_string());
+    }
+
+    if let Key::Char(character) = &key.key
+        && key.modifiers.contains_ctrl()
+        && key.modifiers.contains_shift()
+        && !capabilities.supports_shift_ctrl_distinction
+    {
+        let letter = character.to_ascii_uppercase();
+        return Some(format!(
+            "terminal cannot distinguish Ctrl+Shift+{letter} from Ctrl+{letter}"
+        ));
+    }
+
+    if key.key == Key::Enter {
+        if key.modifiers.contains_shift() && !capabilities.supports_shift_enter {
+            return Some("terminal cannot receive Shift+Enter".to_string());
+        }
+        if key.modifiers.contains_ctrl() && !capabilities.supports_ctrl_enter {
+            return Some("terminal cannot receive Ctrl+Enter".to_string());
+        }
+    }
+
+    None
 }
 
 fn imported_reason(_action: EditorAction) -> &'static str {
@@ -244,7 +315,10 @@ impl From<String> for super::vscode_when::UnsupportedCondition {
 #[cfg(test)]
 mod tests {
     use super::{format_key_for_config, import_vscode_keybindings};
-    use crate::keymap::{EditorAction, Source, parse_key_sequence};
+    use crate::{
+        input::KeyboardCapabilities,
+        keymap::{EditorAction, Source, parse_key_sequence},
+    };
 
     #[test]
     fn imports_and_classifies_every_fixture_entry() {
@@ -263,7 +337,7 @@ mod tests {
             { "key": "ctrl+x", "command": "cursorUp", "when": "editorFocus" }
         ]"#;
 
-        let imported = import_vscode_keybindings(fixture).unwrap();
+        let imported = import_vscode_keybindings(fixture, &KeyboardCapabilities::modern()).unwrap();
         let summary = imported.report.summary();
 
         assert_eq!(summary.imported, 4);
@@ -332,6 +406,7 @@ mod tests {
                 { "key": "ctrl+m", "command": "cursorDown", "when": "resourceLangId == markdown" },
                 { "key": "ctrl+[IntlBackslash]", "command": "cursorDown" }
             ]"#,
+            &KeyboardCapabilities::modern(),
         )
         .unwrap();
 
@@ -357,6 +432,90 @@ mod tests {
                 "missing `{expected}` in\n{report}"
             );
         }
+    }
+
+    /// Table-driven per TASK-260712-16 testcases: a legacy terminal disables
+    /// exactly the chords SPEC-0003's four rules say it must, with the
+    /// documented fixed reason string, and never disables an arrow-key
+    /// chord (`ctrl+shift+right`) because legacy CSI already carries that
+    /// modifier information.
+    #[test]
+    fn legacy_capability_disables_undeliverable_chords_table_driven() {
+        let cases: &[(&str, &str, &str, Option<&str>)] = &[
+            (
+                "super chord",
+                "cmd+s",
+                "workbench.action.files.save",
+                Some("terminal cannot deliver Cmd/Super"),
+            ),
+            (
+                "ctrl+shift character",
+                "ctrl+shift+j",
+                "cursorDownSelect",
+                Some("terminal cannot distinguish Ctrl+Shift+J from Ctrl+J"),
+            ),
+            (
+                "shift+enter",
+                "shift+enter",
+                "cursorDown",
+                Some("terminal cannot receive Shift+Enter"),
+            ),
+            (
+                "ctrl+enter",
+                "ctrl+enter",
+                "cursorUp",
+                Some("terminal cannot receive Ctrl+Enter"),
+            ),
+            (
+                "ctrl+shift+right stays deliverable (legacy CSI carries the modifier)",
+                "ctrl+shift+right",
+                "cursorRightSelect",
+                None,
+            ),
+        ];
+
+        for (name, key, command, expected_reason) in cases {
+            let fixture = format!(r#"[{{ "key": "{key}", "command": "{command}" }}]"#);
+            let imported =
+                import_vscode_keybindings(&fixture, &KeyboardCapabilities::legacy()).unwrap();
+            let summary = imported.report.summary();
+
+            match expected_reason {
+                Some(reason) => {
+                    assert_eq!(summary.disabled_by_terminal_capability, 1, "{name}");
+                    assert_eq!(summary.imported, 0, "{name}");
+                    assert_eq!(
+                        imported.report.disabled_by_terminal_capability[0].reason, *reason,
+                        "{name}"
+                    );
+                    assert!(
+                        imported.bindings.is_empty(),
+                        "{name}: a disabled chord must not become a binding"
+                    );
+                }
+                None => {
+                    assert_eq!(summary.disabled_by_terminal_capability, 0, "{name}");
+                    assert_eq!(summary.imported, 1, "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn modern_capability_imports_every_chord_legacy_would_disable() {
+        let fixture = r#"[
+            { "key": "cmd+s", "command": "workbench.action.files.save" },
+            { "key": "ctrl+shift+j", "command": "cursorDownSelect" },
+            { "key": "shift+enter", "command": "cursorDown" },
+            { "key": "ctrl+enter", "command": "cursorUp" },
+            { "key": "ctrl+shift+right", "command": "cursorRightSelect" }
+        ]"#;
+
+        let imported = import_vscode_keybindings(fixture, &KeyboardCapabilities::modern()).unwrap();
+        let summary = imported.report.summary();
+
+        assert_eq!(summary.disabled_by_terminal_capability, 0);
+        assert_eq!(summary.imported, 5);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # ADR-0003: Terminal Keyboard Capability Abstraction
 
-- Status: Proposed
-- Date: 2026-07-05
+- Status: Accepted
+- Date: 2026-07-05(Accepted: 2026-07-12)
 
 ## Context
 
@@ -70,9 +70,10 @@ Greenfield のため影響なし。
 
 ## Open Questions
 
-- capability 検出に失敗した(応答がない)場合の timeout と default 値。
-- tmux 配下での検出戦略(`$TMUX` 検出時に保守的な capability に倒すか)。
+- ~~capability 検出に失敗した(応答がない)場合の timeout と default 値。~~ → 解決(2026-07-12、TASK-260712-16): timeout 500ms + default は保守的な all-false(legacy)。加えて DA1(`CSI c`)を併送し、DA1 応答が先に届いた時点で legacy を即確定するため、実際に timeout まで待つのは DA1 にも応答しない例外的な terminal のみ
+- ~~tmux 配下での検出戦略(`$TMUX` 検出時に保守的な capability に倒すか)。~~ → 解決(2026-07-12): `$TMUX` の特別扱いはしない。tmux も DA1 に応答するので通常の検出フローで legacy / modern(extended-keys 透過時)が正しく判定され、ずれた場合は inspector で確認できる
 
 ## Progress
 
 - 2026-07-05: 初版作成(Proposed)。詳細仕様は SPEC-0003。
+- 2026-07-12: TASK-260712-16 で実装(Accepted)。検出は `CSI ?u` 応答 + DA1 fallback、`input/capabilities.rs` の `CapabilityProbe`(pure)+ event loop 結線。importer の `Disabled by terminal capability` 分類と起動時 warning、inspector の protocol 行まで結線。
