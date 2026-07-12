@@ -186,7 +186,7 @@ mise run release:prepare -- 0.0.0
 # git diff
 # git add Cargo.toml Cargo.lock
 # git commit -m "Release v0.0.0"
-# git tag v0.1.0
+# git tag v0.0.0
 
 # 3. Human-only publish. Validates version / clean tree / tag=HEAD, then pushes the
 #    commit + tag; goreleaser rebuilds from the tagged commit and creates the GitHub
