@@ -1,6 +1,6 @@
 # AGENTS - Development Guide
 ## Overview
-- `coda` (working name): keymap-first な TUI text editor。GUI editor (VS Code 等) で育てた keybinding を import し、terminal 内での短時間編集 (SSH 先・git rebase・設定ファイル修正) を筋肉記憶のまま行えるようにする
+- `coda`: keymap-first な TUI text editor。GUI editor (VS Code 等) で育てた keybinding を import し、terminal 内での短時間編集 (SSH 先・git rebase・設定ファイル修正) を筋肉記憶のまま行えるようにする
 - 技術スタック: Rust (edition 2024)、macOS / Linux 向け単体バイナリ。TUI framework は未選定 (keybinding engine 完成後に判断。ADR-0004)
 - 最重要ドキュメント:
     - 製品の目的と Non-goals: `docs/ADR-0001-keymap-first-tui-editor.md`

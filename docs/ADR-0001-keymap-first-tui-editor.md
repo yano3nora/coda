@@ -1,6 +1,6 @@
 # ADR-0001: Keymap-first TUI Text Editor
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-05
 
 ## Context
@@ -84,9 +84,10 @@ Greenfield のため既存実装・利用者への影響はない。
 
 ## Open Questions
 
-- **製品名**: repo 名 `coda` は既存製品(Coda.io、旧 Panic Coda)と衝突する。公開前に名称を再検討する。
-- 配布形態(cargo / homebrew / 単体 binary)と SSH 先への bootstrap 方法。
+- SSH 先へ binary を導入する bootstrap を、GitHub Release からの手動 copy より簡単にする必要があるか。
 
 ## Progress
 
 - 2026-07-05: 初版作成(Proposed)。関連 doc: ADR-0002〜0005、SPEC-0001〜0005。
+- 2026-07-12: 製品名を `coda` に確定。既存製品との同名リスクは認識した上で、現時点の利用規模では rename コストを正当化しないと判断した。
+- 2026-07-12: v0.1 の配布を GitHub Releases の macOS / Linux 向け単体 binary とし、mise の GitHub backend から導入できる asset 命名に決定した。crates.io / Homebrew / 自動 release workflow は利用実績ができるまで追加しない。

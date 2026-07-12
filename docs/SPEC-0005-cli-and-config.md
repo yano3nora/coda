@@ -127,8 +127,7 @@ rescue > user (bindings.json) > generated (imported) > default
 ## Open Questions
 
 - `bindings.json` を JSONC として許容するか(ADR-0005 Open Questions)
-- `<app>` の正式名称(ADR-0001 Open Questions: `coda` の名称衝突)
-- stdin からの読み込み(`git diff | <app> -`)を MVP に含めるか
+- stdin からの読み込み(`git diff | coda -`)を MVP 後に含めるか
 
 ## Progress
 

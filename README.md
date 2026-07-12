@@ -4,8 +4,8 @@ coda
 **Keymap-first TUI text editor** — GUI editor(VS Code 等)で育てた keybinding を import して、terminal の中でも自分の筋肉記憶のままテキストを編集するためのエディタ。
 
 > Vim の代替でも VS Code の terminal 版でもない。「既存 keymap を持ち込める plain text editor」(詳細: [ADR-0001](docs/ADR-0001-keymap-first-tui-editor.md))
->
-> ⚠️ `coda` は working name(既存製品との名称衝突があるため公開前に再検討。ADR-0001 Open Questions)
+
+現在は **v0.1 release candidate 前**。MVP の中核は動作するが、配布 asset と Linux 実機検証は未完了。
 
 ## Features
 
@@ -20,7 +20,7 @@ coda
 
 ## Installation
 
-現状は**ソースからのビルドのみ**(配布形態は未定。[backlog](docs/TASK-260706-99-backlog.md) 参照)。
+現状は**ソースからの build のみ**。
 
 ```sh
 # 要 Rust toolchain (rustup または mise install)
@@ -28,6 +28,13 @@ cargo install --path .        # ~/.cargo/bin/coda に入る
 
 # または手動配置
 cargo build --release         # target/release/coda を PATH の通った場所へ
+```
+
+v0.1 以降は GitHub Release の単体 binary を、mise の GitHub backend から導入できる形にする予定:
+
+```sh
+# release asset 公開後に利用可能（現時点ではまだ使えない）
+mise use -g github:yano3nora/coda@0.1.0
 ```
 
 SSH 先で使う場合は、同一 OS / arch のホストへ release binary をコピーすればよい(単体 binary。ただし Linux は glibc 動的リンクのため、極端に古い distro では要再ビルド)。
@@ -101,12 +108,22 @@ mise run pre-commit   # fmt --check / clippy -D warnings / test
 
 ## Deployment / Distribution
 
-- **未整備**(意図的)。crates.io publish・homebrew・GitHub Releases の選定はリリース前タスク([backlog](docs/TASK-260706-99-backlog.md) の「リリース前に必ず」)
-- 前提として製品名の再検討(`coda` の名称衝突)と CI 整備が先
-- `git push` / publish 等の外部公開操作は人間が判断・実行する([AGENTS.md](AGENTS.md) の規約)
+v0.1 は **GitHub Releases の macOS / Linux 向け単体 binary** に限定する。crates.io / Homebrew / 自動 publish は、手動 release で asset 命名と導入 UX が安定してから判断する。
+
+予定する release flow:
+
+1. `mise run release:prepare -- <version>` で version bump・test・全 target の snapshot asset / checksum を生成
+2. 人間が差分を review し、commit と `v<version>` tag を作成
+3. 人間だけが `release:publish` を実行し、push と GitHub Release 作成を行う
+4. 公開 asset を `mise use -g github:yano3nora/coda@<version>` で smoke test
+
+Agent は 1 の検証までしか行わず、commit / tag / push / publish は行わない。実装状況と release gate は [TASK-260712-19](docs/TASK-260712-19-v0.1-release-readiness.md)を参照。
 
 ## Status
 
-MVP 受け入れ基準(SPEC-0001)のうち Editor / Keymap / Scope 系は完了。残りは terminal capability 検出の結線(「区別不能な binding の明示」)。今後の予定は `docs/TASK-*-backlog.md` を参照。
+MVP 受け入れ基準(SPEC-0001)は全項目達成済み。v0.1 までに長行表示・小さな編集 gap・ファイル保護・配布再現性・Linux 検証を仕上げる。
+
+- [v0.1 release readiness](docs/TASK-260712-19-v0.1-release-readiness.md)
+- [v0.1 後の backlog](docs/TASK-999999-backlog.md)
 
 macOS / Linux 対応(Windows は対象外)。動作確認は主に Ghostty / kitty 系 terminal。
