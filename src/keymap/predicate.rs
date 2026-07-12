@@ -40,6 +40,24 @@ impl ContextPredicate {
     pub fn term_count(&self) -> usize {
         self.terms.len()
     }
+
+    /// Returns the name of the first *positive* (non-negated) term whose
+    /// name appears in `keys`, or `None` if there is no such term.
+    ///
+    /// Used by the VS Code importer (`context::RESERVED_FALSE_KEYS`) to
+    /// decide whether a binding's `when` clause can never evaluate true: a
+    /// positive term on a permanently-false key anywhere in the conjunction
+    /// makes the whole predicate always-false (`a && false == false`
+    /// regardless of the other terms), but a *negated* term on that key
+    /// (`!suggestVisible`) is always-true and must not count — precision
+    /// matters here, since flagging a negated term would wrongly mark a
+    /// perfectly reachable binding as dead.
+    pub fn positive_term_matching<'a>(&'a self, keys: &[&str]) -> Option<&'a str> {
+        self.terms
+            .iter()
+            .find(|term| !term.negated && keys.contains(&term.name.as_str()))
+            .map(|term| term.name.as_str())
+    }
 }
 
 impl FromStr for ContextPredicate {
@@ -169,5 +187,32 @@ mod tests {
                 "resourceLangId".to_string()
             ))
         );
+    }
+
+    /// Table-driven per the importer's "inactive context" requirement: a
+    /// positive term on a reserved key anywhere in the conjunction blocks
+    /// the predicate, a negated term never does, and an unrelated key never
+    /// matches at all.
+    #[test]
+    fn positive_term_matching_finds_only_non_negated_reserved_terms() {
+        let reserved = ["suggestVisible", "quickOpenVisible"];
+        let cases: &[(&str, Option<&str>)] = &[
+            ("suggestVisible", Some("suggestVisible")),
+            ("!suggestVisible", None),
+            ("editorFocus && suggestVisible", Some("suggestVisible")),
+            ("suggestVisible && editorFocus", Some("suggestVisible")),
+            ("editorFocus && !suggestVisible", None),
+            ("editorFocus", None),
+            ("quickOpenVisible", Some("quickOpenVisible")),
+        ];
+
+        for (input, expected) in cases {
+            let predicate = input.parse::<ContextPredicate>().unwrap();
+            assert_eq!(
+                predicate.positive_term_matching(&reserved),
+                *expected,
+                "{input}"
+            );
+        }
     }
 }

@@ -158,3 +158,7 @@ Source: imported:vscode
 - 2026-07-05: rescue を「複数の例外ショートカット」から「command palette 単一入口(`F1` 保証)」に変更。`Ctrl+c` / `Ctrl+s` / `Ctrl+q` / `Ctrl+g` を user keymap に開放。
 - 2026-07-05: palette の便宜キーを `Ctrl+Shift+p` から `Ctrl+Space` に変更。Ghostty 実測で `Cmd+Shift+P` が Ghostty 自身の palette に消費されることを確認したため(GUI shell と有名キーを取り合わない方針。ADR-0007)。
 - 2026-07-06: default binding 方針を「最小」から「rescue + OS 標準 text 操作の慣習キー」へ拡張。editor 固有機能は引き続き import / user binding 優先で最小維持。
+- 2026-07-12: which-key を実装 ([TASK](TASK-260712-which-key-config-cmd.md))。sequence prefix
+  入力中に候補一覧 overlay を自動表示する方式で、`:which-key Ctrl+j` の引数付き command 形式は
+  palette が引数をサポートするまで見送り。palette 便宜キーは `[keymap] palette_key` で変更可能
+  (F1 は常に有効)。

@@ -7,12 +7,18 @@ use std::{
 
 use crate::{
     highlight::ThemeChoice,
-    keymap::{Binding, Source, load_bindings_with_source, load_user_bindings},
+    keymap::{Binding, Source, load_bindings_with_source, load_user_bindings, parse_key_chord},
 };
+
+use crate::input::KeyEvent;
 
 use super::import_cli::config_base_dir;
 
-#[derive(Debug, Clone, Default)]
+/// Default for `[keymap] sequence_timeout_ms` (SPEC-0005); mirrors the
+/// event loop's historical hardcoded value.
+pub(crate) const DEFAULT_SEQUENCE_TIMEOUT_MS: u64 = 800;
+
+#[derive(Debug, Clone)]
 pub struct AppConfig {
     pub user_bindings: Vec<Binding>,
     pub warnings: Vec<String>,
@@ -20,15 +26,38 @@ pub struct AppConfig {
     /// Startup default for visual line wrap (`[editor] wrap`,
     /// TASK-260711-18). `view.toggleWrap` flips it at runtime.
     pub wrap: bool,
+    /// `[keymap] sequence_timeout_ms`: how long a pending key sequence waits
+    /// for its next chord before the exact match (if any) fires (SPEC-0002).
+    pub sequence_timeout_ms: u64,
+    /// `[keymap] palette_key`: replacement chord for the `ctrl+space`
+    /// convenience rescue binding. `None` keeps the default. F1 stays
+    /// hardwired regardless (SPEC-0002 rescue rule).
+    pub palette_key: Option<KeyEvent>,
+    /// `[terminal] capability_warning`: whether the startup legacy-terminal
+    /// warning is shown. The detection itself always runs — this only gates
+    /// the status-bar message (SPEC-0005).
+    pub capability_warning: bool,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            user_bindings: Vec::new(),
+            warnings: Vec::new(),
+            theme: ThemeChoice::Dark,
+            wrap: false,
+            sequence_timeout_ms: DEFAULT_SEQUENCE_TIMEOUT_MS,
+            palette_key: None,
+            capability_warning: true,
+        }
+    }
 }
 
 pub fn load() -> AppConfig {
     let Some(base_dir) = config_base_dir() else {
         return AppConfig {
-            user_bindings: Vec::new(),
             warnings: vec!["HOME is not set; skipped user/imported bindings".to_string()],
-            theme: ThemeChoice::Dark,
-            wrap: false,
+            ..AppConfig::default()
         };
     };
     load_from_base_dir(&base_dir)
@@ -54,30 +83,28 @@ pub(crate) fn load_from_base_dir(base_dir: &Path) -> AppConfig {
     bindings.extend(user.bindings);
     warnings.extend(user.warnings);
 
-    let (theme, wrap) = load_config_toml(&base_dir.join("config.toml"), &mut warnings);
+    let mut config = load_config_toml(&base_dir.join("config.toml"), &mut warnings);
 
-    AppConfig {
-        user_bindings: bindings,
-        warnings,
-        theme,
-        wrap,
-    }
+    config.user_bindings = bindings;
+    config.warnings = warnings;
+    config
 }
 
-/// Reads `config.toml` once and extracts every supported setting. Broken or
+/// Reads `config.toml` once and extracts every supported setting into an
+/// `AppConfig` (bindings/warnings are filled in by the caller). Broken or
 /// missing values never abort startup: each falls back to its default with a
 /// warning (silent-breakage rule, AGENTS.md).
-fn load_config_toml(path: &Path, warnings: &mut Vec<String>) -> (ThemeChoice, bool) {
-    let defaults = (ThemeChoice::Dark, false);
+fn load_config_toml(path: &Path, warnings: &mut Vec<String>) -> AppConfig {
+    let mut config = AppConfig::default();
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return defaults,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return config,
         Err(error) => {
             warnings.push(format!(
                 "{}: {error}; using default settings",
                 path.display()
             ));
-            return defaults;
+            return config;
         }
     };
 
@@ -88,38 +115,88 @@ fn load_config_toml(path: &Path, warnings: &mut Vec<String>) -> (ThemeChoice, bo
                 "{}: {error}; using default settings",
                 path.display()
             ));
-            return defaults;
+            return config;
         }
     };
 
-    let theme = match value
+    if let Some(theme) = value
         .get("appearance")
         .and_then(|appearance| appearance.get("theme"))
         .and_then(toml::Value::as_str)
     {
-        Some(theme) => ThemeChoice::parse(theme).unwrap_or_else(|| {
+        config.theme = ThemeChoice::parse(theme).unwrap_or_else(|| {
             warnings.push(format!(
                 "{}: unsupported appearance.theme={theme:?}; using default dark theme",
                 path.display()
             ));
             ThemeChoice::Dark
-        }),
-        None => ThemeChoice::Dark,
-    };
+        });
+    }
 
-    let wrap = match value.get("editor").and_then(|editor| editor.get("wrap")) {
-        Some(toml::Value::Boolean(wrap)) => *wrap,
+    match value.get("editor").and_then(|editor| editor.get("wrap")) {
+        Some(toml::Value::Boolean(wrap)) => config.wrap = *wrap,
         Some(other) => {
             warnings.push(format!(
                 "{}: editor.wrap must be true or false, got {other}; using wrap = false",
                 path.display()
             ));
-            false
         }
-        None => false,
-    };
+        None => {}
+    }
 
-    (theme, wrap)
+    let keymap = value.get("keymap");
+
+    match keymap.and_then(|keymap| keymap.get("sequence_timeout_ms")) {
+        // Zero would fire the exact match before a sequence can ever be
+        // typed, effectively disabling multi-chord bindings — treat it as a
+        // configuration mistake, not a feature.
+        Some(toml::Value::Integer(ms)) if *ms > 0 => config.sequence_timeout_ms = *ms as u64,
+        Some(other) => {
+            warnings.push(format!(
+                "{}: keymap.sequence_timeout_ms must be a positive integer, got {other}; \
+                 using {DEFAULT_SEQUENCE_TIMEOUT_MS}",
+                path.display()
+            ));
+        }
+        None => {}
+    }
+
+    match keymap.and_then(|keymap| keymap.get("palette_key")) {
+        Some(toml::Value::String(chord)) => match parse_key_chord(chord) {
+            Ok(key) => config.palette_key = Some(key),
+            Err(error) => {
+                warnings.push(format!(
+                    "{}: keymap.palette_key {chord:?} is invalid ({error}); keeping ctrl+space",
+                    path.display()
+                ));
+            }
+        },
+        Some(other) => {
+            warnings.push(format!(
+                "{}: keymap.palette_key must be a string like \"ctrl+space\", got {other}; \
+                 keeping ctrl+space",
+                path.display()
+            ));
+        }
+        None => {}
+    }
+
+    match value
+        .get("terminal")
+        .and_then(|terminal| terminal.get("capability_warning"))
+    {
+        Some(toml::Value::Boolean(enabled)) => config.capability_warning = *enabled,
+        Some(other) => {
+            warnings.push(format!(
+                "{}: terminal.capability_warning must be true or false, got {other}; \
+                 using capability_warning = true",
+                path.display()
+            ));
+        }
+        None => {}
+    }
+
+    config
 }
 
 struct LoadedFile {
@@ -177,6 +254,13 @@ theme = \"dark\"  # \"dark\" | \"light\"
 
 [editor]
 wrap = false  # visual line wrap; toggle at runtime with view.toggleWrap (alt+z)
+
+[keymap]
+sequence_timeout_ms = 800     # pending key sequence wait before the exact match fires
+palette_key = \"ctrl+space\"    # palette convenience key; F1 always works
+
+[terminal]
+capability_warning = true  # startup warning when the terminal cannot distinguish modified keys
 ";
 
 /// Scaffold written into `bindings.json` when `config.openKeybindings`
@@ -273,6 +357,94 @@ mod tests {
         assert!(!loaded.wrap);
         assert_eq!(loaded.warnings.len(), 1);
         assert!(loaded.warnings[0].contains("editor.wrap"));
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// SPEC-0005 `[keymap]` / `[terminal]` wiring: each option accepts a
+    /// valid value, and a wrong type warns and falls back without breaking
+    /// startup (silent-breakage rule).
+    #[test]
+    fn load_reads_keymap_and_terminal_options() {
+        let temp = temp_config_dir("keymap-terminal");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("config.toml"),
+            "[keymap]\nsequence_timeout_ms = 1200\npalette_key = \"ctrl+k\"\n\n\
+             [terminal]\ncapability_warning = false\n",
+        )
+        .unwrap();
+
+        let loaded = load_from_base_dir(&temp);
+
+        assert_eq!(loaded.sequence_timeout_ms, 1200);
+        assert_eq!(
+            loaded.palette_key,
+            Some(crate::keymap::parse_key_chord("ctrl+k").unwrap())
+        );
+        assert!(!loaded.capability_warning);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[test]
+    fn load_warns_and_defaults_for_invalid_keymap_and_terminal_options() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "timeout-type",
+                "[keymap]\nsequence_timeout_ms = \"soon\"\n",
+                "sequence_timeout_ms",
+            ),
+            (
+                "timeout-zero",
+                "[keymap]\nsequence_timeout_ms = 0\n",
+                "sequence_timeout_ms",
+            ),
+            (
+                "palette-bad-chord",
+                "[keymap]\npalette_key = \"nope+x+y\"\n",
+                "palette_key",
+            ),
+            (
+                "palette-type",
+                "[keymap]\npalette_key = 12\n",
+                "palette_key",
+            ),
+            (
+                "capability-type",
+                "[terminal]\ncapability_warning = \"off\"\n",
+                "capability_warning",
+            ),
+        ];
+        for (label, toml, expected_in_warning) in cases {
+            let temp = temp_config_dir(&format!("invalid-{label}"));
+            fs::create_dir_all(&temp).unwrap();
+            fs::write(temp.join("config.toml"), toml).unwrap();
+
+            let loaded = load_from_base_dir(&temp);
+
+            assert_eq!(loaded.sequence_timeout_ms, 800, "{label}");
+            assert_eq!(loaded.palette_key, None, "{label}");
+            assert!(loaded.capability_warning, "{label}");
+            assert_eq!(loaded.warnings.len(), 1, "{label}: {:?}", loaded.warnings);
+            assert!(
+                loaded.warnings[0].contains(expected_in_warning),
+                "{label}: {:?}",
+                loaded.warnings
+            );
+            fs::remove_dir_all(&temp).unwrap();
+        }
+    }
+
+    #[test]
+    fn load_defaults_keymap_and_terminal_options_when_missing() {
+        let temp = temp_config_dir("missing-keymap-terminal");
+        fs::create_dir_all(&temp).unwrap();
+
+        let loaded = load_from_base_dir(&temp);
+
+        assert_eq!(loaded.sequence_timeout_ms, 800);
+        assert_eq!(loaded.palette_key, None);
+        assert!(loaded.capability_warning);
         fs::remove_dir_all(&temp).unwrap();
     }
 

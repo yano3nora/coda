@@ -149,7 +149,7 @@ impl CapabilityProbe {
         let detection = match event {
             InputEvent::CapabilityReply(flags) => Some(CapabilityDetection::KittyFlags(*flags)),
             InputEvent::DeviceAttributes => Some(CapabilityDetection::LegacyDeviceAttributes),
-            InputEvent::Key(_) | InputEvent::Paste(_) => None,
+            InputEvent::Key(_) | InputEvent::Paste(_) | InputEvent::Mouse(_) => None,
         };
         if detection.is_some() {
             self.resolved = true;

@@ -1,5 +1,15 @@
 //! Editor context flags used by `when` predicates.
 
+/// Context keys that are reserved for future UI (completion / quick-open
+/// overlays) and are never set `true` anywhere in the MVP runtime context
+/// builder (SPEC-0002). A `when` clause whose only positive requirement is
+/// one of these keys can therefore never fire today — the VS Code importer
+/// uses this list to classify such bindings as "inactive" instead of a
+/// plain "imported" (they are still written to the generated bindings, so
+/// they activate automatically if a future version starts setting the
+/// context flag; only the import report classification differs).
+pub const RESERVED_FALSE_KEYS: &[&str] = &["suggestVisible", "quickOpenVisible"];
+
 /// Snapshot of editor/UI state that may affect keybinding resolution.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct EditorContext {

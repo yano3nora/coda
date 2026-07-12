@@ -135,3 +135,9 @@ rescue > user (bindings.json) > generated (imported) > default
 ## Progress
 
 - 2026-07-05: 初版。
+- 2026-07-12: `[keymap] sequence_timeout_ms` / `[keymap] palette_key` /
+  `[terminal] capability_warning` を結線し、`keymap verify` と
+  `keymap import --cmd=keep|ctrl|both` を実装
+  ([TASK](TASK-260712-which-key-config-cmd.md) /
+  [TASK](TASK-260712-mouse-verify-inactive-ssh.md))。verify の report は
+  `import-reports/latest-verify.txt` に保存する。

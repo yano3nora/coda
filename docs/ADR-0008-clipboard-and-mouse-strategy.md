@@ -1,6 +1,6 @@
 # ADR-0008: Clipboard and Mouse Strategy (terminal delegation boundary)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-05
 
 ## Context
@@ -69,3 +69,9 @@ SPEC-0001(mouse を deferred から v0.2 帯へ、clipboard 挙動の明記)、S
 ## Progress
 
 - 2026-07-05: 初版作成(Proposed)。ADR-0007 の Ghostty 実測を受けて委譲境界を定義。
+- 2026-07-12: 決定 3 の SGR mouse support (DECSET 1002/1006、click / drag / wheel、
+  Shift+drag 素通し) を実装し Accepted へ
+  ([TASK](TASK-260712-mouse-verify-inactive-ssh.md))。wheel 単位は 3 行固定・加速なし
+  (Open Question の回答)。double / triple click と OSC 52 拒否時の local fallback は
+  引き続き Open。wheel scroll は cursor 非追従の free scroll とし、次の keystroke で
+  viewport が cursor に再追従する。

@@ -118,3 +118,7 @@ Resolved action: selection.cursorDown
 
 - 2026-07-05: 初版。
 - 2026-07-12: capability detection を実装(TASK-260712-16)。検出方式は `CSI ?u` 応答 + DA1(`CSI c`)fallback。fallback mode の起動時 warning、importer の `Disabled by terminal capability` 分類、inspector(overlay / CLI)の protocol 表示まで結線。
+- 2026-07-12: SGR mouse decode を実装 ([TASK](TASK-260712-mouse-verify-inactive-ssh.md))。
+  `CSI < Cb;Cx;Cy M|m` を `InputEvent::Mouse` として key 解決と別 channel で emit し、
+  DECSET 1002/1006 の有効化・シグナル時の解除も結線。Shift 付き mouse event はアプリ側で
+  無視して terminal 選択に委ねる (ADR-0008)。

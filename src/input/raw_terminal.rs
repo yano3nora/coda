@@ -26,6 +26,7 @@ static mut SIGNAL_RESTORE_TERMIOS: MaybeUninit<Termios> = MaybeUninit::uninit();
 static KEYBOARD_PROTOCOL_PUSHED: AtomicBool = AtomicBool::new(false);
 static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
 static BRACKETED_PASTE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static MOUSE_REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// kitty keyboard protocol: pop the flags we pushed (`CSI < u`).
 const KITTY_POP: &[u8] = b"\x1b[<u";
@@ -33,6 +34,9 @@ const KITTY_POP: &[u8] = b"\x1b[<u";
 const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?25h\x1b[?1049l";
 /// Bracketed paste mode: disable paste envelopes before returning to the shell.
 const BRACKETED_PASTE_DISABLE: &[u8] = b"\x1b[?2004l";
+/// SGR mouse reporting: stop the terminal from sending mouse sequences into
+/// the user's shell after an abnormal exit (ADR-0008).
+const MOUSE_REPORTING_DISABLE: &[u8] = b"\x1b[?1006l\x1b[?1002l";
 
 /// Tracks whether a kitty protocol mode was pushed, so the signal handler can
 /// pop it before exiting. Leaving the mode pushed would corrupt the shell's
@@ -51,6 +55,12 @@ pub(crate) fn set_alt_screen_active(active: bool) {
 /// leave the user's shell wrapping future paste operations in CSI 200/201.
 pub(crate) fn set_bracketed_paste_active(active: bool) {
     BRACKETED_PASTE_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+/// Tracks whether SGR mouse reporting is active, so abnormal exits do not
+/// leave the user's shell receiving mouse escape sequences.
+pub(crate) fn set_mouse_reporting_active(active: bool) {
+    MOUSE_REPORTING_ACTIVE.store(active, Ordering::SeqCst);
 }
 
 /// Restores the original terminal attributes when dropped.
@@ -142,6 +152,15 @@ extern "C" fn restore_then_exit(signal_number: libc::c_int) {
     // Pop the keyboard protocol BEFORE leaving the alternate screen: kitty
     // tracks the keyboard mode stack per screen, and the editor pushes its
     // mode on the alternate screen (see EventLoop::run).
+    if MOUSE_REPORTING_ACTIVE.load(Ordering::SeqCst) {
+        unsafe {
+            libc::write(
+                1,
+                MOUSE_REPORTING_DISABLE.as_ptr().cast(),
+                MOUSE_REPORTING_DISABLE.len(),
+            );
+        }
+    }
     if BRACKETED_PASTE_ACTIVE.load(Ordering::SeqCst) {
         unsafe {
             libc::write(

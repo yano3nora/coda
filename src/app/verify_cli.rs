@@ -1,0 +1,442 @@
+//! `coda keymap verify`: interactive chord deliverability measurement.
+//!
+//! ADR-0007 decision 2(c): protocol negotiation and quirk knowledge can only
+//! warn — whether a chord actually arrives can only be *measured*. This
+//! command asks the user to press each imported chord and records what the
+//! terminal really delivered.
+//!
+//! The decision core is the pure `VerifySession` state machine (unit-tested
+//! without a terminal); the interactive loop is a thin blocking-read shell in
+//! the style of `input::inspect_key`, not the editor event loop.
+
+use std::io::{self, Read, Write};
+
+use crate::{
+    input::{
+        InputEvent, Key, KeyEvent, KeyboardProtocolGuard, Modifiers, RawModeGuard,
+        drain_input_events, flush_pending_escape,
+    },
+    keymap::{Binding, Source, format_key_for_config},
+};
+
+use super::{
+    config,
+    event_loop::poll_stdin,
+    import_cli::{config_base_dir, write_parented},
+};
+
+/// How long a lone ESC may sit in the buffer before it is flushed as the
+/// skip key (mirrors the editor's idle poll granularity).
+const ESC_FLUSH_POLL_MS: i32 = 100;
+
+/// One chord to verify, with the action names it is bound to (possibly via
+/// different sequences) so the prompt can say why the chord matters.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct VerifyTarget {
+    pub(crate) chord: KeyEvent,
+    pub(crate) actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum ChordOutcome {
+    /// The pressed key decoded to exactly the expected chord.
+    Delivered,
+    /// Something else arrived — the terminal consumed or rewrote the chord.
+    /// Carries what was actually decoded so the report can show the delta.
+    Mismatch(KeyEvent),
+    /// The user skipped this chord (Esc).
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum FeedResult {
+    /// The event was recorded (or ignored because verification is done).
+    Recorded,
+    /// The user aborted with Ctrl+C; remaining targets stay untested.
+    Aborted,
+}
+
+pub(crate) struct VerifySession {
+    targets: Vec<VerifyTarget>,
+    outcomes: Vec<Option<ChordOutcome>>,
+    index: usize,
+}
+
+impl VerifySession {
+    /// Collects the unique chords of every *imported* binding (ADR-0007:
+    /// verify measures what the import brought in; defaults and user
+    /// bindings are hand-written for this terminal already). Sequences
+    /// contribute each of their chords individually.
+    pub(crate) fn from_bindings(bindings: &[Binding]) -> Self {
+        let mut targets: Vec<VerifyTarget> = Vec::new();
+        for binding in bindings.iter().filter(|b| b.source == Source::Imported) {
+            for chord in &binding.keys {
+                let action = binding.action.to_string();
+                match targets.iter_mut().find(|target| target.chord == *chord) {
+                    Some(target) => {
+                        if !target.actions.contains(&action) {
+                            target.actions.push(action);
+                        }
+                    }
+                    None => targets.push(VerifyTarget {
+                        chord: chord.clone(),
+                        actions: vec![action],
+                    }),
+                }
+            }
+        }
+        let outcomes = vec![None; targets.len()];
+        Self {
+            targets,
+            outcomes,
+            index: 0,
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    pub(crate) fn is_done(&self) -> bool {
+        self.index >= self.targets.len()
+    }
+
+    pub(crate) fn current(&self) -> Option<&VerifyTarget> {
+        self.targets.get(self.index)
+    }
+
+    /// Feeds one decoded key event. Equality against the expected chord is
+    /// checked *before* the Esc/Ctrl+C control keys, so a binding whose chord
+    /// IS Esc or Ctrl+C can still be verified as delivered.
+    pub(crate) fn feed(&mut self, event: KeyEvent) -> FeedResult {
+        let Some(target) = self.targets.get(self.index) else {
+            return FeedResult::Recorded;
+        };
+        let outcome = if event == target.chord {
+            ChordOutcome::Delivered
+        } else if event == KeyEvent::plain(Key::Esc) {
+            ChordOutcome::Skipped
+        } else if event == KeyEvent::new(Key::Char('c'), Modifiers::ctrl()) {
+            return FeedResult::Aborted;
+        } else {
+            ChordOutcome::Mismatch(event)
+        };
+        self.outcomes[self.index] = Some(outcome);
+        self.index += 1;
+        FeedResult::Recorded
+    }
+
+    /// One line per target plus totals; ends with the `--cmd=ctrl` escape
+    /// hatch hint when a super chord did not arrive (ADR-0007 §3).
+    pub(crate) fn summary_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut delivered = 0;
+        let mut mismatched = 0;
+        let mut skipped = 0;
+        let mut untested = 0;
+        let mut super_undelivered = false;
+
+        for (target, outcome) in self.targets.iter().zip(&self.outcomes) {
+            let chord = format_key_for_config(std::slice::from_ref(&target.chord));
+            let actions = target.actions.join(", ");
+            let line = match outcome {
+                Some(ChordOutcome::Delivered) => {
+                    delivered += 1;
+                    format!("delivered  {chord}  ({actions})")
+                }
+                Some(ChordOutcome::Mismatch(actual)) => {
+                    mismatched += 1;
+                    super_undelivered |= target.chord.modifiers.contains_super();
+                    format!("MISMATCH   {chord}  arrived as {actual}  ({actions})")
+                }
+                Some(ChordOutcome::Skipped) => {
+                    skipped += 1;
+                    format!("skipped    {chord}  ({actions})")
+                }
+                None => {
+                    untested += 1;
+                    format!("untested   {chord}  ({actions})")
+                }
+            };
+            lines.push(line);
+        }
+
+        lines.push(format!(
+            "total: {delivered} delivered, {mismatched} mismatched, {skipped} skipped, {untested} untested"
+        ));
+        if super_undelivered {
+            lines.push(
+                "hint: a Cmd/Super chord did not arrive — the terminal may reserve it; \
+                 consider re-importing with --cmd=ctrl (ADR-0007)"
+                    .to_string(),
+            );
+        }
+        lines
+    }
+}
+
+/// CLI entry: loads bindings, runs the interactive loop, prints and persists
+/// the report. Returns the process exit code.
+pub(crate) fn run_keymap_verify() -> i32 {
+    let loaded = config::load();
+    let session = VerifySession::from_bindings(&loaded.user_bindings);
+    if session.is_empty() {
+        println!(
+            "keymap verify: no imported bindings found; run `coda keymap import vscode <path>` first"
+        );
+        return 0;
+    }
+
+    let session = match run_interactive(session) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("keymap verify failed: {error} (an interactive terminal is required)");
+            return 1;
+        }
+    };
+
+    let lines = session.summary_lines();
+    println!();
+    for line in &lines {
+        println!("{line}");
+    }
+
+    if let Some(base_dir) = config_base_dir() {
+        let path = base_dir.join("import-reports").join("latest-verify.txt");
+        let mut body = lines.join("\n");
+        body.push('\n');
+        match write_parented(&path, body.as_bytes()) {
+            Ok(()) => println!("report written to {}", path.display()),
+            Err(error) => eprintln!("could not write {}: {error}", path.display()),
+        }
+    }
+    0
+}
+
+/// Raw-mode read loop. Restores the terminal before returning so the caller
+/// can print the summary through normal stdout.
+fn run_interactive(mut session: VerifySession) -> io::Result<VerifySession> {
+    let mut raw = RawModeGuard::enable_stdin()?;
+    let mut stdout = io::stdout().lock();
+    // Same protocol posture as the editor: without the kitty push, a modern
+    // terminal would deliver fewer distinguishable chords here than in the
+    // editor itself and the measurement would be wrong.
+    let protocol = KeyboardProtocolGuard::push(&mut stdout)?;
+
+    write_raw_line(
+        &mut stdout,
+        "keymap verify: press each chord as prompted. Esc skips, Ctrl+C quits.",
+    )?;
+    prompt(&mut stdout, &session)?;
+
+    let mut stdin = io::stdin().lock();
+    let mut byte_buffer = Vec::new();
+    let mut chunk = [0_u8; 128];
+    'outer: while !session.is_done() {
+        // Poll instead of blocking on read: a bare ESC (the skip key) is
+        // decoder-Incomplete because it could be the start of an escape
+        // sequence. Only a timeout can disambiguate it — same reasoning as
+        // the editor event loop's `flush_pending_escape` path.
+        let mut keys: Vec<KeyEvent> = Vec::new();
+        if poll_stdin(libc::STDIN_FILENO, ESC_FLUSH_POLL_MS)? {
+            let read = stdin.read(&mut chunk)?;
+            if read == 0 {
+                write_raw_line(&mut stdout, "stdin closed; stopping")?;
+                break;
+            }
+            byte_buffer.extend_from_slice(&chunk[..read]);
+            keys.extend(drain_input_events(&mut byte_buffer).into_iter().filter_map(
+                |event| match event {
+                    InputEvent::Key(key) => Some(key),
+                    _ => None, // capability replies etc. are not presses
+                },
+            ));
+        } else if let Some(key) = flush_pending_escape(&mut byte_buffer) {
+            keys.push(key);
+        }
+        for key in keys {
+            let before = session.index;
+            match session.feed(key) {
+                FeedResult::Aborted => {
+                    write_raw_line(&mut stdout, "aborted")?;
+                    break 'outer;
+                }
+                FeedResult::Recorded => {
+                    if let Some(Some(outcome)) = session.outcomes.get(before) {
+                        let text = match outcome {
+                            ChordOutcome::Delivered => "  -> delivered".to_string(),
+                            ChordOutcome::Mismatch(actual) => {
+                                format!("  -> arrived as {actual}")
+                            }
+                            ChordOutcome::Skipped => "  -> skipped".to_string(),
+                        };
+                        write_raw_line(&mut stdout, &text)?;
+                    }
+                    if session.is_done() {
+                        break 'outer;
+                    }
+                    prompt(&mut stdout, &session)?;
+                }
+            }
+        }
+    }
+
+    drop(protocol);
+    raw.restore()?;
+    Ok(session)
+}
+
+fn prompt(stdout: &mut impl Write, session: &VerifySession) -> io::Result<()> {
+    let Some(target) = session.current() else {
+        return Ok(());
+    };
+    let line = format!(
+        "[{}/{}] press: {}  ({})",
+        session.index + 1,
+        session.targets.len(),
+        format_key_for_config(std::slice::from_ref(&target.chord)),
+        target.actions.join(", ")
+    );
+    write_raw_line(stdout, &line)
+}
+
+/// Raw mode disables `\n` -> `\r\n` output translation; write CRLF manually
+/// (same reasoning as `input::inspect_key`).
+fn write_raw_line(stdout: &mut impl Write, line: &str) -> io::Result<()> {
+    stdout.write_all(line.as_bytes())?;
+    stdout.write_all(b"\r\n")?;
+    stdout.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChordOutcome, FeedResult, VerifySession};
+    use crate::keymap::{Binding, EditorAction, Source, parse_key_sequence};
+
+    fn binding(keys: &str, action: EditorAction, source: Source) -> Binding {
+        Binding::new(parse_key_sequence(keys).unwrap(), action, None, source)
+    }
+
+    fn chord(text: &str) -> crate::input::KeyEvent {
+        crate::keymap::parse_key_chord(text).unwrap()
+    }
+
+    #[test]
+    fn from_bindings_collects_unique_imported_chords_including_sequence_parts() {
+        let bindings = vec![
+            binding("cmd+s", EditorAction::FileSave, Source::Imported),
+            // sequence: both chords become targets; ctrl+k deduped below
+            binding("ctrl+k ctrl+u", EditorAction::CursorUp, Source::Imported),
+            binding("ctrl+k ctrl+d", EditorAction::CursorDown, Source::Imported),
+            // non-imported sources are not verified
+            binding("ctrl+q", EditorAction::AppQuit, Source::Default),
+            binding("ctrl+j", EditorAction::CursorDown, Source::User),
+        ];
+
+        let session = VerifySession::from_bindings(&bindings);
+
+        let chords: Vec<_> = session
+            .targets
+            .iter()
+            .map(|target| target.chord.clone())
+            .collect();
+        assert_eq!(
+            chords,
+            vec![
+                chord("cmd+s"),
+                chord("ctrl+k"),
+                chord("ctrl+u"),
+                chord("ctrl+d")
+            ]
+        );
+        assert_eq!(
+            session.targets[1].actions,
+            vec!["cursor.up".to_string(), "cursor.down".to_string()],
+            "shared prefix chord lists every action it serves"
+        );
+    }
+
+    /// Table-driven transitions: delivered / mismatch / skip / abort, plus
+    /// the "expected chord IS a control key" precedence rule.
+    #[test]
+    fn feed_records_outcomes_and_control_keys() {
+        let bindings = vec![
+            binding("cmd+s", EditorAction::FileSave, Source::Imported),
+            binding("cmd+z", EditorAction::EditUndo, Source::Imported),
+            binding("cmd+a", EditorAction::SelectionAll, Source::Imported),
+        ];
+        let mut session = VerifySession::from_bindings(&bindings);
+
+        assert_eq!(session.feed(chord("cmd+s")), FeedResult::Recorded);
+        assert_eq!(session.outcomes[0], Some(ChordOutcome::Delivered));
+
+        // terminal rewrote cmd+z into ctrl+z
+        assert_eq!(session.feed(chord("ctrl+z")), FeedResult::Recorded);
+        assert_eq!(
+            session.outcomes[1],
+            Some(ChordOutcome::Mismatch(chord("ctrl+z")))
+        );
+
+        assert_eq!(session.feed(chord("escape")), FeedResult::Recorded);
+        assert_eq!(session.outcomes[2], Some(ChordOutcome::Skipped));
+        assert!(session.is_done());
+    }
+
+    #[test]
+    fn ctrl_c_aborts_leaving_the_rest_untested() {
+        let bindings = vec![
+            binding("cmd+s", EditorAction::FileSave, Source::Imported),
+            binding("cmd+z", EditorAction::EditUndo, Source::Imported),
+        ];
+        let mut session = VerifySession::from_bindings(&bindings);
+
+        assert_eq!(session.feed(chord("ctrl+c")), FeedResult::Aborted);
+        assert_eq!(session.outcomes, vec![None, None]);
+
+        let summary = session.summary_lines();
+        assert!(
+            summary
+                .iter()
+                .any(|line| line.contains("0 delivered, 0 mismatched, 0 skipped, 2 untested")),
+            "{summary:?}"
+        );
+    }
+
+    /// A binding whose chord IS Esc or Ctrl+C must match before the control
+    /// keys are interpreted.
+    #[test]
+    fn expected_control_chords_verify_as_delivered() {
+        let bindings = vec![
+            binding("escape", EditorAction::PaletteOpen, Source::Imported),
+            binding("ctrl+c", EditorAction::EditCopy, Source::Imported),
+        ];
+        let mut session = VerifySession::from_bindings(&bindings);
+
+        assert_eq!(session.feed(chord("escape")), FeedResult::Recorded);
+        assert_eq!(session.outcomes[0], Some(ChordOutcome::Delivered));
+        assert_eq!(session.feed(chord("ctrl+c")), FeedResult::Recorded);
+        assert_eq!(session.outcomes[1], Some(ChordOutcome::Delivered));
+    }
+
+    #[test]
+    fn summary_suggests_cmd_ctrl_when_a_super_chord_is_undelivered() {
+        let bindings = vec![binding("cmd+z", EditorAction::EditUndo, Source::Imported)];
+        let mut session = VerifySession::from_bindings(&bindings);
+        session.feed(chord("ctrl+z"));
+
+        let summary = session.summary_lines();
+        assert!(
+            summary.iter().any(|line| line.contains("--cmd=ctrl")),
+            "{summary:?}"
+        );
+
+        // ...but not when everything arrived
+        let mut session = VerifySession::from_bindings(&bindings);
+        session.feed(chord("cmd+z"));
+        let summary = session.summary_lines();
+        assert!(
+            !summary.iter().any(|line| line.contains("--cmd=ctrl")),
+            "{summary:?}"
+        );
+    }
+}

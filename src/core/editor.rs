@@ -505,6 +505,14 @@ impl EditorCore {
         self.selection = Some(Selection::new(start, end));
     }
 
+    /// Moves the cursor to a (clamped) buffer position and clears any
+    /// selection — the mouse-click primitive (ADR-0008).
+    pub fn set_cursor_position(&mut self, position: Position) {
+        self.cursor = self.buffer.clamp_position(position);
+        self.update_preferred();
+        self.selection = None;
+    }
+
     /// Selects a grapheme range and places the cursor at the range end.
     pub fn select_range(&mut self, start: Position, end: Position) {
         let start = self.buffer.clamp_position(start);

@@ -6,6 +6,15 @@
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct ImportReport {
     pub imported: Vec<ReportEntry>,
+    /// Bindings that parsed successfully and *are* written to the generated
+    /// output (they function identically to `imported`), but whose `when`
+    /// clause references a context key that coda never sets true in the MVP
+    /// (`context::RESERVED_FALSE_KEYS`) — so the binding can never actually
+    /// fire today. Classified separately from `imported` so re-import
+    /// doesn't silently hide "this shortcut looks imported but is dead"
+    /// (product rule: 黙って壊れない / never silently break — ADR-0007 §3,
+    /// SPEC-0004).
+    pub inactive_contexts: Vec<ReportEntry>,
     pub ignored: Vec<ReportEntry>,
     pub unsupported_commands: Vec<ReportEntry>,
     pub unsupported_conditions: Vec<ReportEntry>,
@@ -45,6 +54,7 @@ impl ReportEntry {
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct ImportSummary {
     pub imported: usize,
+    pub inactive_contexts: usize,
     pub ignored: usize,
     pub unsupported_commands: usize,
     pub unsupported_conditions: usize,
@@ -57,6 +67,7 @@ impl ImportReport {
     pub fn summary(&self) -> ImportSummary {
         ImportSummary {
             imported: self.imported.len(),
+            inactive_contexts: self.inactive_contexts.len(),
             ignored: self.ignored.len(),
             unsupported_commands: self.unsupported_commands.len(),
             unsupported_conditions: self.unsupported_conditions.len(),
@@ -69,6 +80,7 @@ impl ImportReport {
     pub fn total_classified(&self) -> usize {
         let summary = self.summary();
         summary.imported
+            + summary.inactive_contexts
             + summary.ignored
             + summary.unsupported_commands
             + summary.unsupported_conditions
@@ -100,6 +112,14 @@ impl ImportReport {
             ),
             String::new(),
             colorize(style, style.imported, format!("Imported: {}", s.imported)),
+            colorize(
+                style,
+                style.inactive,
+                format!(
+                    "Inactive (when-context never active in coda): {}",
+                    s.inactive_contexts
+                ),
+            ),
             colorize(style, style.ignored, format!("Ignored: {}", s.ignored)),
             colorize(
                 style,
@@ -151,6 +171,13 @@ impl ImportReport {
             style.imported,
             "Imported",
             &self.imported,
+        );
+        push_section(
+            &mut sections,
+            style,
+            style.inactive,
+            "Inactive (when-context never active in coda)",
+            &self.inactive_contexts,
         );
         push_section(
             &mut sections,
@@ -261,6 +288,10 @@ pub struct ReportStyle {
     /// color prefix for section headings (`Imported (22):`).
     pub title: &'static str,
     pub imported: &'static str,
+    /// "Inactive contexts" bucket — shares yellow with `unsupported`: the
+    /// binding isn't lost (it's in the generated output), but like an
+    /// unsupported command/condition it needs the user's attention.
+    pub inactive: &'static str,
     pub ignored: &'static str,
     /// Shared by "Unsupported commands" and "Unsupported conditions" — the
     /// task groups both under yellow.
@@ -281,6 +312,7 @@ impl ReportStyle {
         Self {
             title: "",
             imported: "",
+            inactive: "",
             ignored: "",
             unsupported: "",
             invalid: "",
@@ -297,6 +329,7 @@ impl ReportStyle {
         Self {
             title: "\x1b[1m",
             imported: "\x1b[32m",
+            inactive: "\x1b[33m",
             ignored: "\x1b[2m",
             unsupported: "\x1b[33m",
             invalid: "\x1b[31m",
@@ -312,8 +345,8 @@ mod tests {
     use super::{ImportReport, ReportEntry, ReportStyle};
 
     /// Builds a report with at least one entry in every bucket, so rendering
-    /// tests exercise every color branch (`imported`/`ignored`/`unsupported`
-    /// x2/`invalid` x2/`disabled`) in one shot.
+    /// tests exercise every color branch (`imported`/`inactive`/`ignored`/
+    /// `unsupported` x2/`invalid` x2/`disabled`) in one shot.
     fn sample_report() -> ImportReport {
         ImportReport {
             imported: vec![ReportEntry::new(
@@ -321,6 +354,12 @@ mod tests {
                 Some("cursor.down".to_string()),
                 None,
                 "imported",
+            )],
+            inactive_contexts: vec![ReportEntry::new(
+                Some("ctrl+n".to_string()),
+                Some("cursor.down".to_string()),
+                Some("suggestVisible".to_string()),
+                "when references 'suggestVisible', which coda never activates (reserved for future UI)",
             )],
             ignored: vec![ReportEntry::new(
                 Some("ctrl+k".to_string()),
@@ -370,6 +409,7 @@ mod tests {
         for code in [
             style.title,
             style.imported,
+            style.inactive,
             style.ignored,
             style.unsupported,
             style.invalid,
@@ -408,6 +448,13 @@ mod tests {
 
         assert!(
             rendered.contains(&format!("{}Imported (1):", style.imported)),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                "{}Inactive (when-context never active in coda) (1):",
+                style.inactive
+            )),
             "{rendered}"
         );
         assert!(
@@ -465,6 +512,33 @@ mod tests {
         assert!(
             rendered.contains(&format!("{}Ignored: 1{}", style.ignored, style.reset)),
             "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                "{}Inactive (when-context never active in coda): 1{}",
+                style.inactive, style.reset
+            )),
+            "{rendered}"
+        );
+    }
+
+    /// Matches the existing zero-count-bucket convention (`Conflicts (0)`
+    /// etc. never get a heading, TASK-260712-17): an empty
+    /// `inactive_contexts` bucket must not print an "Inactive" section at
+    /// all, only the always-present `Inactive (...): 0` summary line.
+    #[test]
+    fn empty_inactive_bucket_gets_no_section_but_keeps_the_summary_line() {
+        let mut report = sample_report();
+        report.inactive_contexts.clear();
+        let rendered = report.render_text();
+
+        assert!(
+            rendered.contains("Inactive (when-context never active in coda): 0"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("Inactive (when-context never active in coda) ("),
+            "empty bucket must not get a section heading: {rendered}"
         );
     }
 

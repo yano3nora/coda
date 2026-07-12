@@ -12,7 +12,8 @@ use std::{
 use crate::{
     input::{CapabilityDetection, probe_blocking},
     keymap::{
-        ReportStyle, VsCodeImportError, import_vscode_keybindings, render_generated_bindings,
+        CmdStrategy, ReportStyle, VsCodeImportError, import_vscode_keybindings,
+        render_generated_bindings,
     },
 };
 
@@ -26,6 +27,8 @@ pub struct ImportOptions {
     pub path: PathBuf,
     pub dry_run: bool,
     pub print_report: bool,
+    /// ADR-0007 §3 `--cmd=keep|ctrl|both`: how to handle Cmd/Super chords.
+    pub cmd: CmdStrategy,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -100,15 +103,16 @@ pub(crate) fn run_vscode_import_in_base(
         .map_err(|error| format!("{}: {error}", options.path.display()))?;
 
     let capabilities = detection.capabilities();
-    let imported =
-        import_vscode_keybindings(&input, &capabilities).map_err(|error| match error {
+    let imported = import_vscode_keybindings(&input, &capabilities, options.cmd).map_err(
+        |error| match error {
             VsCodeImportError::InvalidJson(detail) => {
                 format!("invalid VS Code keybindings JSON: {detail}")
             }
             VsCodeImportError::RootNotArray => {
                 "VS Code keybindings root must be an array".to_string()
             }
-        })?;
+        },
+    )?;
 
     let generated_path = base_dir.join("generated").join("vscode-bindings.json");
     let report_path = base_dir
@@ -180,7 +184,7 @@ pub(crate) fn config_base_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("coda"))
 }
 
-fn write_parented(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_parented(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -191,7 +195,7 @@ fn write_parented(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::{ImportOptions, no_color_allows_color, run_vscode_import_in_base, supports_color};
     use crate::input::CapabilityDetection;
-    use crate::keymap::ReportStyle;
+    use crate::keymap::{CmdStrategy, ReportStyle};
     use std::fs;
 
     #[test]
@@ -211,6 +215,7 @@ mod tests {
                 path: input_path,
                 dry_run: true,
                 print_report: false,
+                cmd: CmdStrategy::Keep,
             },
             &temp.join("config"),
             &ReportStyle::plain(),
@@ -250,6 +255,7 @@ mod tests {
                 path: input_path,
                 dry_run: false,
                 print_report: false,
+                cmd: CmdStrategy::Keep,
             },
             &temp.join("config"),
             &ReportStyle::plain(),
@@ -283,6 +289,7 @@ mod tests {
                 path: input_path,
                 dry_run: false,
                 print_report: true,
+                cmd: CmdStrategy::Keep,
             },
             &temp.join("config"),
             &ReportStyle::plain(),
@@ -343,6 +350,7 @@ mod tests {
                 path: input_path,
                 dry_run: false,
                 print_report: false,
+                cmd: CmdStrategy::Keep,
             },
             &temp.join("config"),
             &ReportStyle::plain(),
@@ -384,6 +392,7 @@ mod tests {
                 path: input_path,
                 dry_run: false,
                 print_report: false,
+                cmd: CmdStrategy::Keep,
             },
             &base,
             &ReportStyle::plain(),
@@ -421,6 +430,7 @@ mod tests {
                 path: input_path,
                 dry_run: false,
                 print_report: false,
+                cmd: CmdStrategy::Keep,
             },
             &base,
             &ReportStyle::plain(),
@@ -505,6 +515,7 @@ mod tests {
                 path: input_path,
                 dry_run: false,
                 print_report: true,
+                cmd: CmdStrategy::Keep,
             },
             &temp.join("config"),
             &ReportStyle::ansi(),

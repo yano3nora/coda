@@ -11,10 +11,12 @@ use libc::{POLLIN, STDIN_FILENO, pollfd};
 
 use crate::{
     core::editor::{EditorCore, Motion},
+    core::position::Position,
     highlight::{HighlightEngine, ThemeChoice},
     input::{
         BracketedPasteGuard, CapabilityDetection, CapabilityProbe, InputEvent, Key, KeyEvent,
-        KeyboardCapabilities, KeyboardProtocolGuard, Modifiers, RawModeGuard, drain_input_events,
+        KeyboardCapabilities, KeyboardProtocolGuard, Modifiers, MouseButton, MouseEvent,
+        MouseEventKind, MouseReportingGuard, RawModeGuard, drain_input_events,
         flush_pending_escape,
         quirks::{self, QuirkEffect, TerminalQuirk},
     },
@@ -33,10 +35,17 @@ use super::{
     palette::{CommandPalette, filter_actions},
     prompt_overlay::{PromptOutcome, PromptOverlay, PromptPurpose, draw_prompt_overlay},
     search_overlay::{SearchOverlay, draw_search_overlay},
+    which_key::{draw_which_key, which_key_lines},
 };
 
-const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(800);
+/// Startup default for `[keymap] sequence_timeout_ms`; see
+/// `config::DEFAULT_SEQUENCE_TIMEOUT_MS` (SPEC-0005).
+const DEFAULT_SEQUENCE_TIMEOUT: Duration =
+    Duration::from_millis(config::DEFAULT_SEQUENCE_TIMEOUT_MS);
 const IDLE_POLL_MS: i32 = 100;
+/// Wheel scroll unit (ADR-0008 Open Question answer, 260712): 3 visual rows
+/// per notch, no acceleration.
+const WHEEL_SCROLL_LINES: isize = 3;
 /// Keyboard capability negotiation deadline (SPEC-0003 Open Question answer,
 /// design decision 260712): DA1 answering first resolves "legacy" sooner on
 /// terminals that support it, so this is a worst-case fallback, not the
@@ -136,6 +145,22 @@ pub struct EventLoop {
     /// per-document: `view.toggleWrap` and the `[editor] wrap` config apply
     /// to every buffer, mirroring how VS Code's setting behaves in practice.
     wrap: bool,
+    /// `[keymap] sequence_timeout_ms` (SPEC-0005): pending-sequence wait
+    /// before the exact match fires.
+    sequence_timeout: Duration,
+    /// `[terminal] capability_warning` (SPEC-0005): gates only the startup
+    /// status-bar warning; detection itself still runs for `:inspect-key`.
+    capability_warning: bool,
+    /// Last known terminal size, for mapping mouse cells to buffer positions
+    /// outside `draw` (updated by `run()` on startup and resize).
+    screen_size: (u16, u16),
+    /// Buffer position where the current left-button drag started (ADR-0008):
+    /// set on press, extended into a selection on drag, cleared on release.
+    drag_anchor: Option<Position>,
+    /// Whether `draw` keeps the viewport attached to the cursor. Wheel
+    /// scrolling detaches (the view moves, the cursor stays); any keystroke
+    /// or click re-attaches — mirroring how GUI editors treat scroll vs input.
+    follow_cursor: bool,
 }
 
 impl EventLoop {
@@ -216,6 +241,11 @@ impl EventLoop {
             capability_probe: None,
             capability_detection: None,
             wrap: false,
+            sequence_timeout: DEFAULT_SEQUENCE_TIMEOUT,
+            capability_warning: true,
+            screen_size: (80, 24),
+            drag_anchor: None,
+            follow_cursor: true,
         })
     }
 
@@ -223,6 +253,40 @@ impl EventLoop {
     /// (TASK-260711-18); `view.toggleWrap` flips it at runtime.
     pub(crate) fn set_wrap(&mut self, wrap: bool) {
         self.wrap = wrap;
+    }
+
+    /// Applies `[keymap] sequence_timeout_ms` from config.toml (SPEC-0005).
+    pub(crate) fn set_sequence_timeout(&mut self, timeout: Duration) {
+        self.sequence_timeout = timeout;
+    }
+
+    /// Applies `[terminal] capability_warning` from config.toml (SPEC-0005).
+    pub(crate) fn set_capability_warning(&mut self, enabled: bool) {
+        self.capability_warning = enabled;
+    }
+
+    /// Applies `[keymap] palette_key` from config.toml: rebinds the
+    /// `ctrl+space` convenience rescue binding to the configured chord. The
+    /// `escape` (palette-visible) rescue binding and the hardwired F1 are
+    /// untouched, so the palette can never be configured out of reach
+    /// (SPEC-0002).
+    pub(crate) fn set_palette_key(&mut self, key: KeyEvent) {
+        let bindings = self
+            .resolver
+            .bindings()
+            .iter()
+            .cloned()
+            .map(|mut binding| {
+                if binding.source == crate::keymap::Source::Rescue
+                    && binding.action == EditorAction::PaletteOpen
+                    && binding.when.is_none()
+                {
+                    binding.keys = vec![key.clone()];
+                }
+                binding
+            })
+            .collect();
+        self.resolver = Resolver::new(bindings);
     }
 
     /// Ghostty quirks detected at startup, for the `:inspect-key` live mode
@@ -252,9 +316,11 @@ impl EventLoop {
             Instant::now() + CAPABILITY_PROBE_TIMEOUT,
         ));
         let _paste = BracketedPasteGuard::enable(alt.writer_mut())?;
+        let _mouse = MouseReportingGuard::enable(alt.writer_mut())?;
         let mut stdin = io::stdin().lock();
         let mut byte_buffer = Vec::new();
         let (width, height) = terminal_size().unwrap_or((80, 24));
+        self.screen_size = (width, height);
         let mut prev = Screen::new(width, height);
         let mut first_render = true;
 
@@ -310,6 +376,7 @@ impl EventLoop {
             if take_pending_resize()
                 && let Some((width, height)) = terminal_size()
             {
+                self.screen_size = (width, height);
                 prev.resize(width, height);
                 first_render = true;
             }
@@ -337,6 +404,7 @@ impl EventLoop {
         );
         let modified = document.is_modified();
         let wrap = self.wrap;
+        let follow_cursor = self.follow_cursor;
         document.view.draw(
             &document.editor,
             screen,
@@ -349,7 +417,18 @@ impl EventLoop {
             },
             1,
             wrap,
+            follow_cursor,
         );
+        // Which-key (backlog P1): re-resolve the pending prefix each frame so
+        // the panel always mirrors what the resolver would do — no cached
+        // candidate state to fall out of sync.
+        if !self.pending_keys.is_empty()
+            && let ResolveResult::Pending { exact, candidates } =
+                self.resolver.resolve(&self.pending_keys, &self.context())
+        {
+            let lines = which_key_lines(&self.pending_keys, &candidates, exact);
+            draw_which_key(screen, &pending, &lines);
+        }
         let items = filter_actions(&self.palette.query, self.resolver.bindings());
         draw_search_overlay(screen, &self.search);
         draw_prompt_overlay(screen, &self.prompt);
@@ -363,11 +442,77 @@ impl EventLoop {
         match event {
             InputEvent::Key(key) => self.handle_key(key),
             InputEvent::Paste(text) => self.handle_paste_input(&text),
+            InputEvent::Mouse(mouse) => self.handle_mouse_event(mouse),
             InputEvent::CapabilityReply(_) | InputEvent::DeviceAttributes => {
                 self.feed_capability_probe(&event);
                 QuitDecision::Continue
             }
         }
+    }
+
+    /// Click = cursor move, drag = selection, wheel = viewport scroll
+    /// (ADR-0008 §3). Shift-modified events are left alone so the terminal's
+    /// own Shift+drag selection convention keeps working, and events during
+    /// an overlay are dropped — overlays are keyboard-driven and a click must
+    /// not silently move the cursor underneath them.
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) -> QuitDecision {
+        if mouse.modifiers.contains_shift() {
+            return QuitDecision::Continue;
+        }
+        if self.palette.visible || self.prompt.visible || self.inspector.visible {
+            return QuitDecision::Continue;
+        }
+        match mouse.kind {
+            MouseEventKind::WheelUp => self.scroll_view(-WHEEL_SCROLL_LINES),
+            MouseEventKind::WheelDown => self.scroll_view(WHEEL_SCROLL_LINES),
+            MouseEventKind::Press(MouseButton::Left) => {
+                if let Some(position) = self.mouse_buffer_position(&mouse) {
+                    self.editor_mut().set_cursor_position(position);
+                    self.drag_anchor = Some(position);
+                    self.follow_cursor = true;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let (Some(anchor), Some(position)) =
+                    (self.drag_anchor, self.mouse_buffer_position(&mouse))
+                {
+                    self.editor_mut().select_range(anchor, position);
+                    self.follow_cursor = true;
+                }
+            }
+            MouseEventKind::Release(MouseButton::Left) => self.drag_anchor = None,
+            // Middle/right buttons have no assigned behavior (ADR-0008 keeps
+            // scope at click/drag/wheel).
+            MouseEventKind::Press(_) | MouseEventKind::Drag(_) | MouseEventKind::Release(_) => {}
+        }
+        QuitDecision::Continue
+    }
+
+    /// Maps a 1-based mouse cell to a buffer position, excluding the tab bar
+    /// (row 0) and the status line (last row).
+    fn mouse_buffer_position(&self, mouse: &MouseEvent) -> Option<Position> {
+        let x = mouse.column.saturating_sub(1);
+        let y = mouse.row.saturating_sub(1);
+        let (width, height) = self.screen_size;
+        if y < 1 || y + 1 >= height {
+            return None;
+        }
+        let document = self.active_document();
+        document
+            .view
+            .screen_to_buffer(&document.editor, x, y, 1, width, self.wrap)
+    }
+
+    /// Wheel scroll: moves the viewport and detaches cursor following until
+    /// the next keystroke or click (see `follow_cursor`).
+    fn scroll_view(&mut self, delta: isize) {
+        let (width, _) = self.screen_size;
+        let wrap = self.wrap;
+        let document = self.active_document_mut();
+        document
+            .view
+            .scroll_lines(&document.editor, delta, width, wrap);
+        self.follow_cursor = false;
     }
 
     /// Feeds a decoded capability-query reply to the in-flight probe, if
@@ -404,7 +549,7 @@ impl EventLoop {
     fn resolve_capabilities(&mut self, detection: CapabilityDetection) {
         self.capability_probe = None;
         self.capability_detection = Some(detection);
-        if detection.capabilities() != KeyboardCapabilities::modern() {
+        if self.capability_warning && detection.capabilities() != KeyboardCapabilities::modern() {
             self.message = if self.message.is_empty() {
                 LEGACY_CAPABILITY_WARNING.to_string()
             } else {
@@ -430,6 +575,7 @@ impl EventLoop {
     }
 
     fn handle_paste_input(&mut self, text: &str) -> QuitDecision {
+        self.follow_cursor = true;
         let sanitized = text.replace('\n', "");
         if self.palette.visible {
             self.palette.push_text(&sanitized);
@@ -462,6 +608,9 @@ impl EventLoop {
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> QuitDecision {
+        // Any keystroke re-attaches the viewport to the cursor after a wheel
+        // scroll (GUI editor convention: typing jumps back to the caret).
+        self.follow_cursor = true;
         if event == KeyEvent::plain(Key::F(1)) {
             self.toggle_palette();
             return QuitDecision::Continue;
@@ -496,9 +645,10 @@ impl EventLoop {
                 self.clear_pending();
                 self.dispatch(action)
             }
-            ResolveResult::Pending { candidates, .. } => {
+            ResolveResult::Pending { .. } => {
+                // The which-key overlay (drawn from `draw`, which re-resolves
+                // the prefix) shows the candidates; no status message needed.
                 self.pending_since = Some(Instant::now());
-                self.message = format!("pending: {}", format_candidates(&candidates));
                 QuitDecision::Continue
             }
             ResolveResult::NoMatch => {
@@ -860,7 +1010,7 @@ impl EventLoop {
         let Some(started) = self.pending_since else {
             return QuitDecision::Continue;
         };
-        if started.elapsed() < SEQUENCE_TIMEOUT {
+        if started.elapsed() < self.sequence_timeout {
             return QuitDecision::Continue;
         }
         let result = self.resolver.resolve(&self.pending_keys, &self.context());
@@ -1136,10 +1286,10 @@ impl EventLoop {
     fn poll_timeout_ms(&self) -> i32 {
         if let Some(started) = self.pending_since {
             let elapsed = started.elapsed();
-            if elapsed >= SEQUENCE_TIMEOUT {
+            if elapsed >= self.sequence_timeout {
                 0
             } else {
-                (SEQUENCE_TIMEOUT - elapsed)
+                (self.sequence_timeout - elapsed)
                     .as_millis()
                     .min(i32::MAX as u128) as i32
             }
@@ -1323,22 +1473,6 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         }
     }
     unique
-}
-
-fn format_candidates(candidates: &[(Vec<KeyEvent>, EditorAction)]) -> String {
-    candidates
-        .iter()
-        .map(|(keys, action)| {
-            format!(
-                "{} -> {action}",
-                keys.iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[cfg(test)]
@@ -2089,6 +2223,259 @@ keybind = super+digit_1=goto_tab:1
         assert_eq!(
             event_loop.message,
             "legacy terminal input: Ctrl+Shift+J / Shift+Enter etc. cannot be distinguished — run inspector.open for details; new file"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// SPEC-0005 `[terminal] capability_warning = false`: the status-bar
+    /// warning is suppressed, but detection itself still resolves so
+    /// `:inspect-key` keeps its protocol line.
+    #[test]
+    fn capability_warning_off_suppresses_message_but_keeps_detection() {
+        let path = temp_path("capability-warning-off");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.message.clear();
+        event_loop.set_capability_warning(false);
+
+        event_loop.capability_probe = Some(CapabilityProbe::arm(
+            Instant::now() + Duration::from_millis(500),
+        ));
+        event_loop.handle_input_event(InputEvent::DeviceAttributes);
+
+        assert_eq!(
+            event_loop.capability_detection,
+            Some(CapabilityDetection::LegacyDeviceAttributes)
+        );
+        assert_eq!(event_loop.message, "");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// SPEC-0005 `[keymap] palette_key`: the configured chord replaces the
+    /// ctrl+space convenience binding, the old chord stops opening the
+    /// palette, and hardwired F1 keeps working (rescue rule, SPEC-0002).
+    #[test]
+    fn set_palette_key_rebinds_convenience_key_and_keeps_f1() {
+        let path = temp_path("palette-key");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.set_palette_key(crate::keymap::parse_key_chord("ctrl+k").unwrap());
+
+        event_loop.handle_key(crate::keymap::parse_key_chord("ctrl+k").unwrap());
+        assert!(event_loop.palette.visible, "configured chord opens palette");
+        event_loop.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(!event_loop.palette.visible);
+
+        event_loop.handle_key(crate::keymap::parse_key_chord("ctrl+space").unwrap());
+        assert!(
+            !event_loop.palette.visible,
+            "replaced chord no longer opens palette"
+        );
+
+        event_loop.handle_key(KeyEvent::plain(Key::F(1)));
+        assert!(event_loop.palette.visible, "F1 stays hardwired");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// ADR-0008 mouse: click = cursor move (clearing selection), drag =
+    /// selection from the press anchor, release = anchor cleared.
+    #[test]
+    fn mouse_click_and_drag_drive_cursor_and_selection() {
+        use crate::input::{MouseButton, MouseEvent, MouseEventKind};
+
+        let path = temp_path("mouse-click-drag");
+        std::fs::write(&path, b"alpha\nbravo\ncharlie\n").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        let mouse = |kind, column, row| MouseEvent {
+            kind,
+            modifiers: crate::input::Modifiers::default(),
+            column,
+            row,
+        };
+
+        // Gutter is 4 cells; row 2 of the screen = buffer line 0 is the tab
+        // bar... row indexing: mouse row is 1-based, row 1 = tab bar, row 2 =
+        // buffer line 0. Column 6 = text cell 1.
+        event_loop.handle_mouse_event(mouse(MouseEventKind::Press(MouseButton::Left), 6, 3));
+        assert_eq!(
+            event_loop.editor().cursor,
+            crate::core::position::Position::new(1, 1),
+            "click places the cursor"
+        );
+        assert!(event_loop.editor().selection.is_none());
+
+        event_loop.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), 9, 3));
+        let selection = event_loop.editor().selection.expect("drag selects");
+        assert_eq!(
+            selection.range(),
+            (
+                crate::core::position::Position::new(1, 1),
+                crate::core::position::Position::new(1, 4)
+            )
+        );
+
+        event_loop.handle_mouse_event(mouse(MouseEventKind::Release(MouseButton::Left), 9, 3));
+        assert!(
+            event_loop.drag_anchor.is_none(),
+            "release clears the anchor"
+        );
+
+        // Tab bar and status line clicks change nothing.
+        let before = event_loop.editor().cursor;
+        event_loop.handle_mouse_event(mouse(MouseEventKind::Press(MouseButton::Left), 3, 1));
+        event_loop.handle_mouse_event(mouse(MouseEventKind::Press(MouseButton::Left), 3, 24));
+        assert_eq!(event_loop.editor().cursor, before);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// ADR-0008 §3: Shift+drag belongs to the terminal's native selection —
+    /// if a terminal forwards it anyway, coda must not start a selection.
+    #[test]
+    fn shift_modified_mouse_events_are_ignored_for_terminal_passthrough() {
+        use crate::input::{MouseButton, MouseEvent, MouseEventKind};
+
+        let path = temp_path("mouse-shift-passthrough");
+        std::fs::write(&path, b"alpha\nbravo\n").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        let before = event_loop.editor().cursor;
+
+        event_loop.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Press(MouseButton::Left),
+            modifiers: crate::input::Modifiers::shift(),
+            column: 6,
+            row: 3,
+        });
+
+        assert_eq!(event_loop.editor().cursor, before);
+        assert!(event_loop.editor().selection.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// ADR-0008 wheel: scrolling moves the viewport without the cursor and
+    /// detaches cursor-following; the next keystroke re-attaches it.
+    #[test]
+    fn wheel_scroll_detaches_viewport_until_next_keystroke() {
+        use crate::input::{MouseEvent, MouseEventKind};
+
+        let path = temp_path("mouse-wheel");
+        let text = (0..50).map(|i| format!("line{i}\n")).collect::<String>();
+        std::fs::write(&path, text).unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        event_loop.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::WheelDown,
+            modifiers: crate::input::Modifiers::default(),
+            column: 1,
+            row: 3,
+        });
+        assert_eq!(event_loop.active_document().view.top_line, 3);
+        assert_eq!(event_loop.editor().cursor.line, 0, "cursor did not move");
+        assert!(!event_loop.follow_cursor);
+
+        // Drawing while detached must not snap the viewport back to the cursor.
+        let mut screen = Screen::new(80, 24);
+        event_loop.draw(&mut screen);
+        assert_eq!(event_loop.active_document().view.top_line, 3);
+
+        // A keystroke re-attaches, and the next draw follows the cursor again.
+        event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
+        assert!(event_loop.follow_cursor);
+        let mut screen = Screen::new(80, 24);
+        event_loop.draw(&mut screen);
+        assert_eq!(event_loop.active_document().view.top_line, 0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Backlog P1 `:which-key`: while a sequence prefix is pending, `draw`
+    /// shows the candidate continuations in an overlay above the status line.
+    #[test]
+    fn pending_sequence_draws_which_key_candidates() {
+        use crate::keymap::{Binding, Source, parse_key_sequence};
+
+        let path = temp_path("which-key-draw");
+        std::fs::write(&path, b"one\ntwo\n").unwrap();
+        let bindings = vec![Binding::new(
+            parse_key_sequence("ctrl+k ctrl+u").unwrap(),
+            EditorAction::CursorUp,
+            None,
+            Source::User,
+        )];
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), bindings, ThemeChoice::Dark).unwrap();
+
+        event_loop.handle_key(crate::keymap::parse_key_chord("ctrl+k").unwrap());
+        let mut screen = Screen::new(80, 24);
+        event_loop.draw(&mut screen);
+
+        let all_rows: Vec<String> = (0..screen.height()).map(|y| row_text(&screen, y)).collect();
+        assert!(
+            all_rows
+                .iter()
+                .any(|row| row.contains("Ctrl+U") && row.contains("cursor.up")),
+            "which-key overlay lists the continuation:\n{}",
+            all_rows.join("\n")
+        );
+
+        // Completing the sequence resolves and the overlay disappears.
+        event_loop.handle_key(crate::keymap::parse_key_chord("ctrl+u").unwrap());
+        let mut screen = Screen::new(80, 24);
+        event_loop.draw(&mut screen);
+        let all_rows: Vec<String> = (0..screen.height()).map(|y| row_text(&screen, y)).collect();
+        assert!(
+            !all_rows.iter().any(|row| row.contains("cursor.up")),
+            "overlay cleared after the sequence resolved"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// SPEC-0005 `[keymap] sequence_timeout_ms`: a shortened timeout fires
+    /// the pending exact match without waiting for the 800ms default.
+    #[test]
+    fn set_sequence_timeout_controls_when_the_exact_match_fires() {
+        use crate::keymap::{Binding, Source, parse_key_sequence};
+
+        let path = temp_path("sequence-timeout");
+        std::fs::write(&path, b"one\ntwo\n").unwrap();
+        let bindings = vec![
+            Binding::new(
+                parse_key_sequence("ctrl+k").unwrap(),
+                EditorAction::CursorDown,
+                None,
+                Source::User,
+            ),
+            Binding::new(
+                parse_key_sequence("ctrl+k ctrl+u").unwrap(),
+                EditorAction::CursorUp,
+                None,
+                Source::User,
+            ),
+        ];
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), bindings, ThemeChoice::Dark).unwrap();
+        event_loop.set_sequence_timeout(Duration::from_millis(1));
+
+        event_loop.handle_key(crate::keymap::parse_key_chord("ctrl+k").unwrap());
+        assert!(event_loop.pending_since.is_some(), "sequence is pending");
+        std::thread::sleep(Duration::from_millis(5));
+        event_loop.handle_sequence_timeout();
+
+        assert!(event_loop.pending_since.is_none());
+        assert_eq!(
+            event_loop.editor().cursor.line,
+            1,
+            "exact match (cursor.down) fired after the shortened timeout"
         );
 
         let _ = std::fs::remove_file(path);

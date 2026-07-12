@@ -27,6 +27,11 @@ VS Code `keybindings.json` を読み込み、内部 binding(`generated/vscode-bi
     - 変換後に同一 key・同一 context で衝突したもの
 - `Disabled by terminal capability`
     - 現在の terminal で受信不能な key を使うため無効化されたもの(SPEC-0003)
+- `Inactive (when-context never active in coda)`
+    - 変換・登録には成功するが、`when` が reserved context key
+      (`suggestVisible` / `quickOpenVisible`。MVP では常に false)への肯定参照を
+      含むため発火し得ないもの。generated へは書き出す(将来 context が実装
+      されればそのまま有効になる)が、report で「黙って死んでいる」ことを明示する
 
 ## Behavior
 
@@ -209,3 +214,7 @@ CLI(詳細は SPEC-0005):
 ## Progress
 
 - 2026-07-05: 初版。draft からの変更: `suggestWidgetVisible` / `inQuickOpen` は「変換するが MVP では不活性」と明示する分類を追加。
+- 2026-07-12: `--cmd=keep|ctrl|both` と `Inactive` 分類を実装
+  ([TASK](TASK-260712-which-key-config-cmd.md) /
+  [TASK](TASK-260712-mouse-verify-inactive-ssh.md))。OS 予約キーの
+  `Unsupported: OS/terminal reserved` 分類は未実装 (backlog)。

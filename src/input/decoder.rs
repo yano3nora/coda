@@ -4,7 +4,10 @@
 //! intentionally returns `Incomplete` for prefixes such as a bare ESC or an
 //! unfinished CSI so the caller can wait for more bytes instead of guessing.
 
-use super::{Key, KeyEvent, Modifiers};
+use super::{
+    Key, KeyEvent, Modifiers,
+    mouse::{MouseButton, MouseEvent, MouseEventKind},
+};
 
 /// Result of decoding one input chunk.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -27,6 +30,10 @@ pub enum InputEvent {
     /// fallback signal that a terminal does not understand kitty CSI u at all
     /// (SPEC-0003 detection design 260712).
     DeviceAttributes,
+    /// SGR mouse report (`CSI < Cb;Cx;Cy M|m`, ADR-0008). Kept out of the
+    /// key channel so mouse motion can never look like a keystroke to the
+    /// resolver (SPEC-0003).
+    Mouse(MouseEvent),
 }
 
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -62,7 +69,8 @@ pub fn drain_key_events(buffer: &mut Vec<u8>) -> Vec<KeyEvent> {
             // are added.
             InputEvent::Paste(_)
             | InputEvent::CapabilityReply(_)
-            | InputEvent::DeviceAttributes => None,
+            | InputEvent::DeviceAttributes
+            | InputEvent::Mouse(_) => None,
         })
         .collect()
 }
@@ -210,6 +218,13 @@ fn decode_csi(bytes: &[u8]) -> One {
                 return decode_capability_query(query_params, final_byte, bytes, consumed);
             }
 
+            // `<`-prefixed params are SGR mouse reports (ADR-0008). Like
+            // capability replies they are not keystrokes and must never fall
+            // through to the key paths below.
+            if let Some(mouse_params) = params.strip_prefix(b"<") {
+                return decode_sgr_mouse(mouse_params, final_byte, bytes, consumed);
+            }
+
             if final_byte == b'u' {
                 return decode_kitty_csi_u(params, bytes, consumed);
             }
@@ -257,6 +272,80 @@ fn decode_capability_query(
             consumed,
         ),
     }
+}
+
+/// Decodes an SGR mouse report (`CSI < Cb;Cx;Cy M|m`, ADR-0008). `M` is a
+/// press / drag / wheel, `m` a release; `Cb` packs button (bits 0-1),
+/// Shift/Alt/Ctrl (bits 2-4), drag motion (bit 5), and wheel (bit 6).
+/// Anything that doesn't parse falls back to `Key::Unknown` like any other
+/// unrecognized CSI — never `Incomplete`, since the final byte already
+/// arrived.
+fn decode_sgr_mouse(mouse_params: &[u8], final_byte: u8, bytes: &[u8], consumed: usize) -> One {
+    let unknown = || {
+        key_event(
+            KeyEvent::plain(Key::Unknown(bytes[..consumed].to_vec())),
+            consumed,
+        )
+    };
+
+    if final_byte != b'M' && final_byte != b'm' {
+        return unknown();
+    }
+    let Some(values) = std::str::from_utf8(mouse_params)
+        .ok()
+        .and_then(parse_semicolon_numbers)
+    else {
+        return unknown();
+    };
+    let [code, column, row] = values[..] else {
+        return unknown();
+    };
+
+    let mut modifiers = Modifiers::default();
+    if code & 4 != 0 {
+        modifiers = modifiers.with_shift();
+    }
+    if code & 8 != 0 {
+        modifiers = modifiers.with_alt();
+    }
+    if code & 16 != 0 {
+        modifiers = modifiers.with_ctrl();
+    }
+
+    let kind = if code & 64 != 0 {
+        match code & 3 {
+            0 => MouseEventKind::WheelUp,
+            1 => MouseEventKind::WheelDown,
+            // Horizontal wheel (66/67): not part of the ADR-0008 scope.
+            _ => return unknown(),
+        }
+    } else {
+        let button = match code & 3 {
+            0 => MouseButton::Left,
+            1 => MouseButton::Middle,
+            2 => MouseButton::Right,
+            // 3 = "no button": only DECSET 1003 (any-motion) reports this,
+            // which we never enable.
+            _ => return unknown(),
+        };
+        if final_byte == b'm' {
+            MouseEventKind::Release(button)
+        } else if code & 32 != 0 {
+            MouseEventKind::Drag(button)
+        } else {
+            MouseEventKind::Press(button)
+        }
+    };
+
+    One::Event(
+        InputEvent::Mouse(MouseEvent {
+            kind,
+            modifiers,
+            column,
+            row,
+        }),
+        consumed,
+    )
 }
 
 fn decode_legacy_csi(params: &[u8], final_byte: u8) -> Option<KeyEvent> {
@@ -570,6 +659,161 @@ mod tests {
             assert_eq!(&drain_input_events(&mut buffer), expected, "{name}");
             assert!(buffer.is_empty(), "{name}: buffer not fully drained");
         }
+    }
+
+    /// Table-driven SGR mouse decode (ADR-0008): press / drag / release /
+    /// wheel / modifier bits, plus malformed reports falling back to
+    /// `Key::Unknown` instead of stalling or leaking into the key channel.
+    #[test]
+    fn decode_sgr_mouse_reports_table_driven() {
+        use crate::input::mouse::{MouseButton, MouseEvent, MouseEventKind};
+
+        fn mouse(kind: MouseEventKind, modifiers: Modifiers, column: u16, row: u16) -> InputEvent {
+            InputEvent::Mouse(MouseEvent {
+                kind,
+                modifiers,
+                column,
+                row,
+            })
+        }
+
+        let cases: &[(&str, &[u8], Vec<InputEvent>)] = &[
+            (
+                "left press",
+                b"\x1b[<0;10;5M",
+                vec![mouse(
+                    MouseEventKind::Press(MouseButton::Left),
+                    Modifiers::default(),
+                    10,
+                    5,
+                )],
+            ),
+            (
+                "left drag (motion bit 32)",
+                b"\x1b[<32;11;5M",
+                vec![mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    Modifiers::default(),
+                    11,
+                    5,
+                )],
+            ),
+            (
+                "left release (final byte m)",
+                b"\x1b[<0;11;5m",
+                vec![mouse(
+                    MouseEventKind::Release(MouseButton::Left),
+                    Modifiers::default(),
+                    11,
+                    5,
+                )],
+            ),
+            (
+                "right press",
+                b"\x1b[<2;3;4M",
+                vec![mouse(
+                    MouseEventKind::Press(MouseButton::Right),
+                    Modifiers::default(),
+                    3,
+                    4,
+                )],
+            ),
+            (
+                "wheel up / wheel down",
+                b"\x1b[<64;1;1M\x1b[<65;1;1M",
+                vec![
+                    mouse(MouseEventKind::WheelUp, Modifiers::default(), 1, 1),
+                    mouse(MouseEventKind::WheelDown, Modifiers::default(), 1, 1),
+                ],
+            ),
+            (
+                "shift+drag carries the shift modifier for terminal passthrough",
+                b"\x1b[<36;7;8M",
+                vec![mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    Modifiers::shift(),
+                    7,
+                    8,
+                )],
+            ),
+            (
+                "ctrl+click carries the ctrl modifier",
+                b"\x1b[<16;2;2M",
+                vec![mouse(
+                    MouseEventKind::Press(MouseButton::Left),
+                    Modifiers::ctrl(),
+                    2,
+                    2,
+                )],
+            ),
+            (
+                "mouse report mixed with a following key in one chunk",
+                b"\x1b[<0;1;1Ma",
+                vec![
+                    mouse(
+                        MouseEventKind::Press(MouseButton::Left),
+                        Modifiers::default(),
+                        1,
+                        1,
+                    ),
+                    InputEvent::Key(KeyEvent::plain(Key::Char('a'))),
+                ],
+            ),
+            (
+                "malformed params fall back to Unknown",
+                b"\x1b[<0;1M",
+                vec![InputEvent::Key(KeyEvent::plain(Key::Unknown(
+                    b"\x1b[<0;1M".to_vec(),
+                )))],
+            ),
+            (
+                "horizontal wheel is out of scope and falls back to Unknown",
+                b"\x1b[<66;1;1M",
+                vec![InputEvent::Key(KeyEvent::plain(Key::Unknown(
+                    b"\x1b[<66;1;1M".to_vec(),
+                )))],
+            ),
+        ];
+
+        for (name, input, expected) in cases {
+            let mut buffer = input.to_vec();
+            assert_eq!(&drain_input_events(&mut buffer), expected, "{name}");
+            assert!(buffer.is_empty(), "{name}: buffer not fully drained");
+        }
+    }
+
+    #[test]
+    fn split_sgr_mouse_report_waits_for_the_final_byte() {
+        use crate::input::mouse::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut buffer = b"\x1b[<0;5;5".to_vec();
+        assert_eq!(drain_input_events(&mut buffer), Vec::new());
+        assert_eq!(
+            buffer, b"\x1b[<0;5;5",
+            "incomplete prefix must stay buffered"
+        );
+
+        buffer.extend_from_slice(b"M");
+        assert_eq!(
+            drain_input_events(&mut buffer),
+            vec![InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                modifiers: Modifiers::default(),
+                column: 5,
+                row: 5,
+            })]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn drain_key_events_does_not_leak_mouse_reports() {
+        let mut buffer = b"\x1b[<0;10;5M\x1b[<32;11;5Ma".to_vec();
+        assert_eq!(
+            drain_key_events(&mut buffer),
+            vec![KeyEvent::plain(Key::Char('a'))],
+            "only the trailing 'a' is a real keystroke"
+        );
     }
 
     #[test]

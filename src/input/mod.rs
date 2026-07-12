@@ -7,6 +7,7 @@
 mod capabilities;
 mod decoder;
 mod key_event;
+mod mouse;
 pub mod quirks;
 pub(crate) mod raw_terminal;
 
@@ -20,6 +21,7 @@ pub use decoder::{
     flush_pending_escape,
 };
 pub use key_event::{Key, KeyEvent, Modifiers};
+pub use mouse::{MouseButton, MouseEvent, MouseEventKind};
 pub use raw_terminal::RawModeGuard;
 
 const EXIT_CTRL_C: u8 = 0x03;
@@ -124,6 +126,31 @@ impl Drop for BracketedPasteGuard {
     }
 }
 
+/// Enables SGR mouse reporting for its lifetime and disables it on drop
+/// (ADR-0008 §3): DECSET 1002 (button-event tracking, so drags report) +
+/// 1006 (SGR extended coordinates). Unsupported terminals ignore both.
+/// While active the terminal's native mouse selection is taken over;
+/// Shift+drag stays with the terminal by convention.
+pub struct MouseReportingGuard;
+
+impl MouseReportingGuard {
+    pub fn enable(stdout: &mut impl Write) -> io::Result<Self> {
+        stdout.write_all(b"\x1b[?1002h\x1b[?1006h")?;
+        stdout.flush()?;
+        raw_terminal::set_mouse_reporting_active(true);
+        Ok(Self)
+    }
+}
+
+impl Drop for MouseReportingGuard {
+    fn drop(&mut self) {
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(b"\x1b[?1006l\x1b[?1002l");
+        let _ = stdout.flush();
+        raw_terminal::set_mouse_reporting_active(false);
+    }
+}
+
 fn write_raw_line(stdout: &mut impl Write, line: &str) -> io::Result<()> {
     // Raw mode disables output post-processing on many terminals, so use CRLF
     // explicitly instead of relying on `\n` -> `\r\n` translation.
@@ -149,7 +176,8 @@ fn format_inspect_chunk(chunk: &[u8]) -> Vec<String> {
                 InputEvent::Key(key) => Some(key.to_string()),
                 InputEvent::Paste(_)
                 | InputEvent::CapabilityReply(_)
-                | InputEvent::DeviceAttributes => None,
+                | InputEvent::DeviceAttributes
+                | InputEvent::Mouse(_) => None,
             })
             .collect::<Vec<_>>();
         if !pressed.is_empty() || events.is_empty() {
@@ -183,6 +211,9 @@ fn format_protocol_line(event: &InputEvent) -> Option<String> {
             "Protocol:  primary device attributes received (no kitty CSI u reply — legacy terminal)"
                 .to_string(),
         ),
+        // Mouse reporting is not enabled by `inspect-key`, but a stray
+        // report is still not a keystroke — name it instead of hiding it.
+        InputEvent::Mouse(mouse) => Some(format!("Mouse:     {mouse:?}")),
         InputEvent::Key(_) | InputEvent::Paste(_) => None,
     }
 }

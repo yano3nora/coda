@@ -12,10 +12,13 @@ mod inspector;
 mod palette;
 mod prompt_overlay;
 mod search_overlay;
+mod verify_cli;
+mod which_key;
 
 use std::{env, ffi::OsString, path::PathBuf};
 
 use crate::input;
+use crate::keymap::CmdStrategy;
 use event_loop::EventLoop;
 use import_cli::ImportOptions;
 
@@ -26,7 +29,8 @@ use import_cli::ImportOptions;
 const USAGE: &str = "\
 usage: coda [path...]
        coda inspect-key
-       coda keymap import vscode <path> [--dry-run] [--print-report]
+       coda keymap import vscode <path> [--dry-run] [--print-report] [--cmd=keep|ctrl|both]
+       coda keymap verify
 
 With no path, coda opens a single empty unnamed buffer.";
 
@@ -54,6 +58,7 @@ pub fn run() -> i32 {
                 1
             }
         },
+        Command::KeymapVerify => verify_cli::run_keymap_verify(),
         Command::KeymapImportVscode(options) => match import_cli::run_vscode_import(&options) {
             Ok(output) => {
                 print!("{}", output.stdout);
@@ -84,6 +89,13 @@ fn run_editor(paths: Vec<PathBuf>) -> i32 {
     ) {
         Ok(mut loop_) => {
             loop_.set_wrap(loaded_config.wrap);
+            loop_.set_sequence_timeout(std::time::Duration::from_millis(
+                loaded_config.sequence_timeout_ms,
+            ));
+            loop_.set_capability_warning(loaded_config.capability_warning);
+            if let Some(palette_key) = loaded_config.palette_key {
+                loop_.set_palette_key(palette_key);
+            }
             match loop_.run() {
                 Ok(()) => 0,
                 Err(error) => {
@@ -105,6 +117,7 @@ enum Command {
     Help,
     Version,
     InspectKey,
+    KeymapVerify,
     KeymapImportVscode(ImportOptions),
     OpenFiles(Vec<PathBuf>),
 }
@@ -133,9 +146,17 @@ fn parse_keymap_import_vscode(args: &[OsString]) -> Option<Command> {
     if args.first()? != "keymap" {
         return None;
     }
+    if args.len() >= 2 && args[1] == "verify" {
+        return Some(if args.len() == 2 {
+            Command::KeymapVerify
+        } else {
+            Command::InvalidUsage("keymap verify takes no arguments".to_string())
+        });
+    }
     if args.len() < 3 || args[1] != "import" || args[2] != "vscode" {
         return Some(Command::InvalidUsage(
-            "usage: coda keymap import vscode <path> [--dry-run] [--print-report]".to_string(),
+            "usage: coda keymap import vscode <path> [--dry-run] [--print-report] [--cmd=keep|ctrl|both]\n       coda keymap verify"
+                .to_string(),
         ));
     }
     if args.len() < 4 {
@@ -149,13 +170,33 @@ fn parse_keymap_import_vscode(args: &[OsString]) -> Option<Command> {
         path,
         dry_run: false,
         print_report: false,
+        cmd: CmdStrategy::Keep,
     };
     for flag in &args[4..] {
-        match flag.to_string_lossy().as_ref() {
+        let flag_text = flag.to_string_lossy();
+        match flag_text.as_ref() {
             "--dry-run" => options.dry_run = true,
             // Accepted for backwards compatibility; overwriting is now the default.
             "--replace" => {}
             "--print-report" => options.print_report = true,
+            "--cmd" => {
+                return Some(Command::InvalidUsage(
+                    "missing value for --cmd (expected --cmd=keep|ctrl|both)".to_string(),
+                ));
+            }
+            value if value.starts_with("--cmd=") => {
+                let raw = &value["--cmd=".len()..];
+                options.cmd = match raw {
+                    "keep" => CmdStrategy::Keep,
+                    "ctrl" => CmdStrategy::Ctrl,
+                    "both" => CmdStrategy::Both,
+                    other => {
+                        return Some(Command::InvalidUsage(format!(
+                            "invalid --cmd value: {other} (expected keep|ctrl|both)"
+                        )));
+                    }
+                };
+            }
             unknown => {
                 return Some(Command::InvalidUsage(format!(
                     "unknown keymap import flag: {unknown}"
@@ -169,6 +210,7 @@ fn parse_keymap_import_vscode(args: &[OsString]) -> Option<Command> {
 #[cfg(test)]
 mod tests {
     use super::Command;
+    use crate::keymap::CmdStrategy;
     use std::{ffi::OsString, path::PathBuf};
 
     #[test]
@@ -215,6 +257,24 @@ mod tests {
         );
     }
 
+    /// ADR-0007 §2(c): `keymap verify` parses as its own subcommand and
+    /// rejects stray arguments.
+    #[test]
+    fn parse_keymap_verify_subcommand() {
+        assert_eq!(
+            Command::parse([OsString::from("keymap"), OsString::from("verify")]),
+            Command::KeymapVerify
+        );
+        assert!(matches!(
+            Command::parse([
+                OsString::from("keymap"),
+                OsString::from("verify"),
+                OsString::from("--fast"),
+            ]),
+            Command::InvalidUsage(_)
+        ));
+    }
+
     #[test]
     fn parse_vscode_import_subcommand() {
         assert_eq!(
@@ -231,7 +291,86 @@ mod tests {
                 path: PathBuf::from("keys.json"),
                 dry_run: true,
                 print_report: true,
+                cmd: CmdStrategy::Keep,
             })
         );
+    }
+
+    /// ADR-0007 §3: `--cmd=keep|ctrl|both` parses to the matching
+    /// `CmdStrategy`, table-driven over all three valid values (and the
+    /// absence of the flag, which must default to `Keep`).
+    #[test]
+    fn parse_cmd_flag_values_table_driven() {
+        let cases: &[(Option<&str>, CmdStrategy)] = &[
+            (None, CmdStrategy::Keep),
+            (Some("--cmd=keep"), CmdStrategy::Keep),
+            (Some("--cmd=ctrl"), CmdStrategy::Ctrl),
+            (Some("--cmd=both"), CmdStrategy::Both),
+        ];
+
+        for (flag, expected) in cases {
+            let mut args = vec![
+                OsString::from("keymap"),
+                OsString::from("import"),
+                OsString::from("vscode"),
+                OsString::from("keys.json"),
+            ];
+            if let Some(flag) = flag {
+                args.push(OsString::from(*flag));
+            }
+
+            assert_eq!(
+                Command::parse(args),
+                Command::KeymapImportVscode(super::ImportOptions {
+                    path: PathBuf::from("keys.json"),
+                    dry_run: false,
+                    print_report: false,
+                    cmd: *expected,
+                }),
+                "{flag:?}"
+            );
+        }
+    }
+
+    /// An unrecognized `--cmd` value (e.g. a typo'd modifier name) must be
+    /// rejected with `InvalidUsage`, not silently fall back to a default —
+    /// silently picking the wrong Cmd strategy could reintroduce
+    /// undeliverable Super chords the user was explicitly trying to avoid.
+    #[test]
+    fn parse_cmd_flag_rejects_invalid_value() {
+        let result = Command::parse([
+            OsString::from("keymap"),
+            OsString::from("import"),
+            OsString::from("vscode"),
+            OsString::from("keys.json"),
+            OsString::from("--cmd=meta"),
+        ]);
+        match result {
+            Command::InvalidUsage(message) => {
+                assert!(message.contains("--cmd"), "{message}");
+                assert!(message.contains("meta"), "{message}");
+            }
+            other => panic!("expected InvalidUsage, got {other:?}"),
+        }
+    }
+
+    /// A bare `--cmd` with no `=value` must be rejected with a message that
+    /// explains a value is required, rather than being treated as an unknown
+    /// flag with no further context.
+    #[test]
+    fn parse_cmd_flag_rejects_missing_value() {
+        let result = Command::parse([
+            OsString::from("keymap"),
+            OsString::from("import"),
+            OsString::from("vscode"),
+            OsString::from("keys.json"),
+            OsString::from("--cmd"),
+        ]);
+        match result {
+            Command::InvalidUsage(message) => {
+                assert!(message.contains("--cmd"), "{message}");
+            }
+            other => panic!("expected InvalidUsage, got {other:?}"),
+        }
     }
 }

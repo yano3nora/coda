@@ -5,16 +5,16 @@
 
 ## P1: v0.1 後に早めに欲しい
 
-- [ ] `:which-key`: 入力中の sequence prefix に続く候補一覧を表示する
-- [ ] `config.toml` の残項目結線: `sequence_timeout_ms` / `palette_key` / `capability_warning`
-- [ ] import の `--cmd=keep|ctrl|both`: super が届かない terminal の退路
+- 完了 (260712) → [TASK-260712 which-key / config / --cmd](TASK-260712-which-key-config-cmd.md)
 
 ## P2: v0.2 候補
 
-- [ ] split views: vertical / horizontal、pane focus、maximize
-- [ ] mouse support: SGR protocol、click / drag / wheel、Shift+drag の terminal 素通し
-- [ ] keymap verify: binding の deliverability を対話的に実測する
-- [ ] `suggestVisible` / `quickOpenVisible` を使う imported binding の inactive 表示を明確化する
+- ~~split views: vertical / horizontal、pane focus、maximize~~
+  - split は多機能 editor のやることであり、現時点の coda の責務範囲ではない
+- 完了 (260712) → [TASK-260712 mouse / verify / inactive / SSH bootstrap](TASK-260712-mouse-verify-inactive-ssh.md)
+- [ ] mouse 追補: double / triple click (単語・行選択)、tab bar click での buffer 切替 (ADR-0008 Open Question)
+- [ ] OS 予約キー (`Cmd+Q` / `Cmd+Tab` 等) の `Unsupported: OS/terminal reserved` 分類 (ADR-0007 §4。SPEC-0004 に仕様だけ先行)
+- [ ] keymap verify 結果の永続化と resolver への反映 (`TERM_PROGRAM` + version キー。ADR-0007 Open Question)
 
 ## Deferred: 着手前に再判断
 
@@ -22,7 +22,6 @@
 - [ ] tree-sitter への highlighting engine 差し替え
 - [ ] user theme / recent files / fuzzy file open / read-only mode / diff mode
 - [ ] OSC 52 拒否環境の local fallback（pbcopy / xclip / wl-copy）
-- [ ] SSH bootstrap script
 - [ ] Homebrew / crates.io / mise registry への配布拡大
 - [ ] GitHub Actions による CI（macOS + Linux での fmt / clippy / test。260712 に一度作成したが「複数 platform test を常時回す段階ではない」ため撤去。contributor が増えた時点で再判断）
 - [ ] GitHub Actions による tag 起点の自動 publish

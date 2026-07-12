@@ -39,6 +39,7 @@ impl EditorView {
         digits.max(3) + 1
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         editor: &EditorCore,
@@ -47,6 +48,7 @@ impl EditorView {
         status: StatusLine<'_>,
         origin_y: u16,
         wrap: bool,
+        follow_cursor: bool,
     ) {
         let gutter = Self::gutter_width(editor);
         let editor_rows = screen.height().saturating_sub(origin_y + 1) as usize;
@@ -54,11 +56,15 @@ impl EditorView {
         if wrap {
             // Wrap mode has no horizontal scroll; visual rows absorb the width.
             self.left_col = 0;
-            self.ensure_cursor_visible_wrapped(editor, editor_rows, editor_cols);
+            if follow_cursor {
+                self.ensure_cursor_visible_wrapped(editor, editor_rows, editor_cols);
+            }
             self.draw_wrapped_rows(editor, screen, highlights, origin_y, gutter, editor_rows);
         } else {
             self.top_segment = 0;
-            self.ensure_cursor_visible(editor, editor_rows, editor_cols);
+            if follow_cursor {
+                self.ensure_cursor_visible(editor, editor_rows, editor_cols);
+            }
             self.draw_unwrapped_rows(editor, screen, highlights, origin_y, gutter, editor_rows);
         }
 
@@ -255,12 +261,151 @@ impl EditorView {
     }
 
     fn cursor_screen_position(&self, editor: &EditorCore) -> Option<(u16, u16)> {
+        // Above the viewport (possible while wheel-scrolled away from the
+        // cursor): report "not on screen" instead of saturating to row 0.
+        if editor.cursor.line < self.top_line {
+            return None;
+        }
         let line = editor.buffer.line(editor.cursor.line)?;
         let col = display_col_for_grapheme(line, editor.cursor.grapheme);
         Some((
             (Self::gutter_width(editor) + col.saturating_sub(self.left_col)) as u16,
             editor.cursor.line.saturating_sub(self.top_line) as u16,
         ))
+    }
+
+    /// Maps an absolute screen cell to a buffer position (mouse click,
+    /// ADR-0008) — the inverse of `cursor_screen_position[_wrapped]`.
+    ///
+    /// Forgiving by design: gutter clicks snap to the line start, clicks past
+    /// the end of a line clamp to its last position, and clicks below EOF
+    /// land on the last line. Returns `None` only above the text area
+    /// (`y < origin_y`); the caller is responsible for excluding the status
+    /// line.
+    pub fn screen_to_buffer(
+        &self,
+        editor: &EditorCore,
+        x: u16,
+        y: u16,
+        origin_y: u16,
+        screen_width: u16,
+        wrap: bool,
+    ) -> Option<Position> {
+        let row = usize::from(y.checked_sub(origin_y)?);
+        let gutter = Self::gutter_width(editor);
+        let editor_cols = usize::from(screen_width).saturating_sub(gutter);
+        let x_cells = usize::from(x).saturating_sub(gutter);
+
+        if !wrap {
+            let last_line = editor.buffer.line_count().saturating_sub(1);
+            let line_index = (self.top_line + row).min(last_line);
+            let line = editor.buffer.line(line_index).unwrap_or_default();
+            let grapheme = grapheme_at_display_col(line, self.left_col + x_cells);
+            return Some(Position::new(line_index, grapheme));
+        }
+
+        // Wrap mode: walk visual rows from the viewport top, exactly like
+        // `draw_wrapped_rows` does, to find the clicked (line, segment).
+        let mut line_index = self.top_line;
+        let mut segment_index = self.top_segment;
+        for _ in 0..row {
+            let line = editor.buffer.line(line_index).unwrap_or_default();
+            let segment_count = wrap_segments(line, editor_cols).len();
+            if segment_index + 1 < segment_count {
+                segment_index += 1;
+            } else if line_index + 1 < editor.buffer.line_count() {
+                line_index += 1;
+                segment_index = 0;
+            } else {
+                // Below EOF: stick to the last visual row.
+                segment_index = segment_count - 1;
+                break;
+            }
+        }
+
+        let line = editor.buffer.line(line_index).unwrap_or_default();
+        let segments = wrap_segments(line, editor_cols);
+        let segment_index = segment_index.min(segments.len() - 1);
+        let (start, end) = segments[segment_index];
+        let mut acc = 0;
+        let mut grapheme = start;
+        for (index, g) in line
+            .graphemes(true)
+            .enumerate()
+            .skip(start)
+            .take(end.saturating_sub(start))
+        {
+            let width = grapheme_display_width(g);
+            if acc + width > x_cells {
+                grapheme = index;
+                break;
+            }
+            acc += width;
+            grapheme = index + 1;
+        }
+        // A click past a *continuation* row's content stays on its last
+        // grapheme: `end` itself belongs to the next visual row, which would
+        // make the cursor visually jump a row down.
+        let max_grapheme = if segment_index + 1 == segments.len() {
+            end
+        } else {
+            end.saturating_sub(1).max(start)
+        };
+        Some(Position::new(line_index, grapheme.min(max_grapheme)))
+    }
+
+    /// Scrolls the viewport by `delta` visual rows (wheel, ADR-0008) without
+    /// touching the cursor. The caller stops following the cursor while
+    /// scrolled away; any keystroke re-attaches (event loop).
+    pub fn scroll_lines(
+        &mut self,
+        editor: &EditorCore,
+        delta: isize,
+        screen_width: u16,
+        wrap: bool,
+    ) {
+        if !wrap {
+            let max_top = editor.buffer.line_count().saturating_sub(1);
+            self.top_line = self.top_line.saturating_add_signed(delta).min(max_top);
+            return;
+        }
+
+        let gutter = Self::gutter_width(editor);
+        let cols = usize::from(screen_width).saturating_sub(gutter);
+        let mut remaining = delta.unsigned_abs();
+        if delta < 0 {
+            while remaining > 0 {
+                if self.top_segment > 0 {
+                    let step = self.top_segment.min(remaining);
+                    self.top_segment -= step;
+                    remaining -= step;
+                } else if self.top_line == 0 {
+                    break;
+                } else {
+                    self.top_line -= 1;
+                    self.top_segment =
+                        wrap_segments(editor.buffer.line(self.top_line).unwrap_or_default(), cols)
+                            .len()
+                            - 1;
+                    remaining -= 1;
+                }
+            }
+        } else {
+            while remaining > 0 {
+                let segment_count =
+                    wrap_segments(editor.buffer.line(self.top_line).unwrap_or_default(), cols)
+                        .len();
+                if self.top_segment + 1 < segment_count {
+                    self.top_segment += 1;
+                } else if self.top_line + 1 < editor.buffer.line_count() {
+                    self.top_line += 1;
+                    self.top_segment = 0;
+                } else {
+                    break;
+                }
+                remaining -= 1;
+            }
+        }
     }
 
     fn cursor_screen_position_wrapped(
@@ -487,6 +632,23 @@ fn display_col_for_grapheme(line: &str, target: usize) -> usize {
         .sum()
 }
 
+/// Inverse of `display_col_for_grapheme`: the grapheme whose cell span
+/// contains `target` (a click inside a tab or fullwidth char selects that
+/// grapheme); past the line content it clamps to the end-of-line position.
+fn grapheme_at_display_col(line: &str, target: usize) -> usize {
+    let mut acc = 0;
+    let mut count = 0;
+    for (index, grapheme) in line.graphemes(true).enumerate() {
+        let width = grapheme_display_width(grapheme);
+        if acc + width > target {
+            return index;
+        }
+        acc += width;
+        count = index + 1;
+    }
+    count
+}
+
 fn color_for_grapheme(highlights: &[HighlightSpan], grapheme_index: usize) -> Option<(u8, u8, u8)> {
     highlights
         .iter()
@@ -575,6 +737,7 @@ mod tests {
             },
             0,
             wrap,
+            true,
         );
     }
 
@@ -656,6 +819,112 @@ mod tests {
             !short_row.contains("…"),
             "fitting line must not show a marker: {short_row:?}"
         );
+    }
+
+    /// ADR-0008 mouse: screen cell -> buffer position, wrap off. Gutter is
+    /// 4 cells ("  1 "); origin_y = 1 (tab bar row).
+    #[test]
+    fn screen_to_buffer_maps_clicks_with_wrap_off() {
+        let (editor, view) = view_with("abc\txyz\nあい\nshort\n", Position::new(0, 0));
+        // (x, y, expected (line, grapheme)), screen width 40
+        let cases: &[(&str, u16, u16, (usize, usize))] = &[
+            ("plain char", 6, 1, (0, 2)),
+            ("inside the 4-cell tab selects the tab", 8, 1, (0, 3)),
+            ("after the tab block", 11, 1, (0, 4)),
+            ("gutter click snaps to line start", 1, 2, (1, 0)),
+            ("second cell of a fullwidth char selects it", 5, 2, (1, 0)),
+            ("start of second fullwidth char", 6, 2, (1, 1)),
+            ("past end of line clamps to line end", 30, 2, (1, 2)),
+            ("below EOF clamps to the last line", 4, 9, (2, 0)),
+        ];
+        for (name, x, y, (line, grapheme)) in cases {
+            assert_eq!(
+                view.screen_to_buffer(&editor, *x, *y, 1, 40, false),
+                Some(Position::new(*line, *grapheme)),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            view.screen_to_buffer(&editor, 5, 0, 1, 40, false),
+            None,
+            "tab bar row is not a buffer area"
+        );
+    }
+
+    /// ADR-0008 mouse: wrap off with a horizontally scrolled viewport adds
+    /// `left_col` back into the display column.
+    #[test]
+    fn screen_to_buffer_accounts_for_horizontal_scroll() {
+        let (editor, mut view) = view_with("abcdefghijklmno\n", Position::new(0, 0));
+        view.left_col = 5;
+        assert_eq!(
+            view.screen_to_buffer(&editor, 4, 1, 1, 40, false),
+            Some(Position::new(0, 5)),
+            "first text cell shows grapheme left_col"
+        );
+    }
+
+    /// ADR-0008 mouse: wrap on walks visual rows the same way the renderer
+    /// does — a click on a continuation row maps into the same logical line.
+    #[test]
+    fn screen_to_buffer_maps_clicks_with_wrap_on() {
+        // width 10, gutter 4 -> 6 text cells; "abcdefghij" wraps (0,6) (6,10)
+        let (editor, view) = view_with("abcdefghij\nxy\n", Position::new(0, 0));
+        let cases: &[(&str, u16, u16, (usize, usize))] = &[
+            ("first visual row", 5, 1, (0, 1)),
+            ("continuation row maps into the same line", 5, 2, (0, 7)),
+            (
+                "continuation row clamps to its last grapheme",
+                9,
+                2,
+                (0, 10),
+            ),
+            ("next logical line after the wrapped one", 4, 3, (1, 0)),
+        ];
+        for (name, x, y, (line, grapheme)) in cases {
+            assert_eq!(
+                view.screen_to_buffer(&editor, *x, *y, 1, 10, true),
+                Some(Position::new(*line, *grapheme)),
+                "{name}"
+            );
+        }
+    }
+
+    /// ADR-0008 mouse: a click past a *non-final* wrap segment's content
+    /// stays on that visual row's last grapheme instead of jumping to the
+    /// next row's first grapheme.
+    #[test]
+    fn screen_to_buffer_click_past_non_final_segment_stays_on_the_row() {
+        // width 9 - gutter 4 = 5 text cells; fullwidth chars (2 cells) wrap
+        // as (0,2)(2,4)(4,5) leaving cell 4 of each row empty. A click there
+        // (x=8) accumulates past the segment -> clamp to grapheme 1.
+        let (editor, view) = view_with("あああああ\n", Position::new(0, 0));
+        assert_eq!(
+            view.screen_to_buffer(&editor, 8, 1, 1, 9, true),
+            Some(Position::new(0, 1))
+        );
+    }
+
+    /// ADR-0008 wheel: scroll_lines moves the viewport without the cursor,
+    /// clamping at both buffer ends; wrap mode scrolls by visual rows.
+    #[test]
+    fn scroll_lines_moves_viewport_and_clamps() {
+        let (editor, mut view) = view_with("a\nb\nc\nd\ne\n", Position::new(0, 0));
+        view.scroll_lines(&editor, 3, 10, false);
+        assert_eq!(view.top_line, 3);
+        view.scroll_lines(&editor, 100, 10, false);
+        assert_eq!(view.top_line, 4, "clamps to the last line");
+        view.scroll_lines(&editor, -100, 10, false);
+        assert_eq!(view.top_line, 0, "clamps to the first line");
+
+        // wrap: "abcdefghij" -> 2 visual rows (6 text cells), then "xy"
+        let (editor, mut view) = view_with("abcdefghij\nxy\n", Position::new(0, 0));
+        view.scroll_lines(&editor, 1, 10, true);
+        assert_eq!((view.top_line, view.top_segment), (0, 1));
+        view.scroll_lines(&editor, 1, 10, true);
+        assert_eq!((view.top_line, view.top_segment), (1, 0));
+        view.scroll_lines(&editor, -2, 10, true);
+        assert_eq!((view.top_line, view.top_segment), (0, 0));
     }
 
     /// TASK-260711-18 testcase: while horizontally scrolled, the left edge

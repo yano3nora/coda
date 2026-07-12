@@ -1,6 +1,6 @@
 # ADR-0007: Modifier Delivery Strategy (Cmd / per-terminal quirks)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-05
 
 ## Context
@@ -99,3 +99,7 @@ SPEC-0003(deliverability の非可査性)、SPEC-0004(--cmd オプション、re
 ## Progress
 
 - 2026-07-05: Ghostty 1.3.1 実測に基づき初版作成(Proposed)。super modifier の decode 保持は実装済み。
+- 2026-07-12: 決定 3 の `--cmd=keep|ctrl|both` と決定 2(c) の `keymap verify` を実装し
+  Accepted へ ([TASK](TASK-260712-mouse-verify-inactive-ssh.md))。verify は report 出力
+  (`import-reports/latest-verify.txt`) まで。結果の永続化と resolver への反映は
+  Open Question のまま。決定 4 の OS 予約キー分類は未実装 (backlog)。

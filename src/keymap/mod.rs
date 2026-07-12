@@ -14,7 +14,7 @@ mod vscode_when;
 
 pub use action::{EditorAction, ParseActionError};
 pub use binding::{Binding, Source};
-pub use context::EditorContext;
+pub use context::{EditorContext, RESERVED_FALSE_KEYS};
 pub use key_parse::{ParseKeyError, parse_key_chord, parse_key_sequence};
 pub use predicate::{ContextPredicate, ParsePredicateError};
 pub use report::{ImportReport, ImportSummary, ReportEntry, ReportStyle};
@@ -25,7 +25,7 @@ pub use user_bindings::{
 };
 pub use vscode_commands::action_for_vscode_command;
 pub use vscode_import::{
-    VsCodeImport, VsCodeImportError, format_key_for_config, import_vscode_keybindings,
+    CmdStrategy, VsCodeImport, VsCodeImportError, format_key_for_config, import_vscode_keybindings,
     render_generated_bindings,
 };
 pub use vscode_when::{UnsupportedCondition, convert_vscode_when};
