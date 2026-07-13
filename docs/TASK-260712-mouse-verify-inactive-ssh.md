@@ -1,6 +1,6 @@
 # TASK-260712: mouse / keymap verify / inactive 表示 / SSH bootstrap (backlog P2)
 
-[backlog](TASK-999999-backlog.md) P2 の 4 項目を一括で実施する。
+[backlog](BACKLOG.md) P2 の 4 項目を一括で実施する。
 
 ## asis
 

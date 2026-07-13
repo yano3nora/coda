@@ -1,4 +1,4 @@
-# TASK-999999: Backlog
+# Backlog
 
 日付に依存しない deferred task の索引。v0.1 までの作業と release gate は
 [v0.1 release readiness](TASK-260712-v0.1-release-readiness.md)を正とする。

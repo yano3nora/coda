@@ -1,6 +1,6 @@
 # TASK-260712: which-key / config 残項目 / import --cmd (backlog P1)
 
-[backlog](TASK-999999-backlog.md) P1 の 3 項目を一括で実施する。
+[backlog](BACKLOG.md) P1 の 3 項目を一括で実施する。
 
 ## asis
 
