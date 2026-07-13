@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{InputEvent, RawModeGuard, drain_input_events, poll_readable};
+use super::{InputEvent, RawModeGuard, drain_input_events, poll_stdin_readable, tty};
 
 /// What this terminal can deliver to us, expressed as capabilities rather
 /// than protocol names (SPEC-0003). The keymap importer and resolver only
@@ -73,6 +73,10 @@ pub enum CapabilityDetection {
     /// every terminal answers DA1, so this is the fast, non-timeout path to
     /// "legacy" (design decision 260712).
     LegacyDeviceAttributes,
+    /// win32-input-mode sequences arrived (TASK-260713): the terminal
+    /// honored our `CSI ?9001h` request, so full modifier fidelity is
+    /// available — Windows Terminal's equivalent of kitty CSI u.
+    Win32InputMode,
     /// Neither query was answered before the deadline.
     LegacyTimeout,
     /// stdin or stdout is not a TTY (import CLI run under a pipe/redirect/CI):
@@ -94,7 +98,7 @@ impl CapabilityDetection {
             Self::KittyFlags(_) | Self::LegacyDeviceAttributes | Self::LegacyTimeout => {
                 KeyboardCapabilities::legacy()
             }
-            Self::AssumedModern => KeyboardCapabilities::modern(),
+            Self::Win32InputMode | Self::AssumedModern => KeyboardCapabilities::modern(),
         }
     }
 
@@ -108,6 +112,7 @@ impl CapabilityDetection {
                 format!("legacy (kitty flags={flags}, disambiguate bit unset)")
             }
             Self::LegacyDeviceAttributes => "legacy (DA1 answered, no CSI ?u reply)".to_string(),
+            Self::Win32InputMode => "win32-input-mode (Windows Terminal)".to_string(),
             Self::LegacyTimeout => "legacy (query timed out)".to_string(),
             Self::AssumedModern => {
                 "not detected (not an interactive terminal); assuming modern".to_string()
@@ -124,6 +129,12 @@ impl CapabilityDetection {
 pub struct CapabilityProbe {
     deadline: Instant,
     resolved: bool,
+    /// Whether a DA1 reply alone proves "legacy". True on unix (design
+    /// decision 260712). False on windows: with win32-input-mode requested,
+    /// it is unverified whether the DA1 reply arrives wrapped or plain
+    /// (TASK-260713), so a plain DA1 must keep waiting for win32 evidence
+    /// instead of mis-resolving a fidelity-capable terminal as legacy.
+    da1_resolves_legacy: bool,
 }
 
 impl CapabilityProbe {
@@ -131,9 +142,16 @@ impl CapabilityProbe {
     /// called with a time at or past `deadline`, unless a reply resolves it
     /// first.
     pub fn arm(deadline: Instant) -> Self {
+        Self::with_da1_policy(deadline, cfg!(not(windows)))
+    }
+
+    /// Testable constructor: the DA1 policy is platform behavior, but tests
+    /// must be able to exercise both sides from any host OS.
+    pub(crate) fn with_da1_policy(deadline: Instant, da1_resolves_legacy: bool) -> Self {
         Self {
             deadline,
             resolved: false,
+            da1_resolves_legacy,
         }
     }
 
@@ -148,8 +166,14 @@ impl CapabilityProbe {
         }
         let detection = match event {
             InputEvent::CapabilityReply(flags) => Some(CapabilityDetection::KittyFlags(*flags)),
-            InputEvent::DeviceAttributes => Some(CapabilityDetection::LegacyDeviceAttributes),
-            InputEvent::Key(_) | InputEvent::Paste(_) | InputEvent::Mouse(_) => None,
+            InputEvent::Win32InputMode => Some(CapabilityDetection::Win32InputMode),
+            InputEvent::DeviceAttributes if self.da1_resolves_legacy => {
+                Some(CapabilityDetection::LegacyDeviceAttributes)
+            }
+            InputEvent::DeviceAttributes
+            | InputEvent::Key(_)
+            | InputEvent::Paste(_)
+            | InputEvent::Mouse(_) => None,
         };
         if detection.is_some() {
             self.resolved = true;
@@ -186,9 +210,7 @@ impl CapabilityProbe {
 /// in the redirected file (leaking escape bytes into it), no reply could
 /// ever arrive, and the probe would burn the timeout into a false "legacy".
 pub fn probe_blocking(timeout: Duration) -> CapabilityDetection {
-    let stdin_is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } != 0;
-    let stdout_is_tty = unsafe { libc::isatty(libc::STDOUT_FILENO) } != 0;
-    if !stdin_is_tty || !stdout_is_tty {
+    if !tty::stdin_is_tty() || !tty::stdout_is_tty() {
         return CapabilityDetection::AssumedModern;
     }
 
@@ -218,7 +240,7 @@ fn probe_blocking_tty(timeout: Duration) -> io::Result<CapabilityDetection> {
             return Ok(CapabilityDetection::LegacyTimeout);
         }
         let remaining_ms = (deadline - now).as_millis().min(i32::MAX as u128) as i32;
-        if !poll_readable(libc::STDIN_FILENO, remaining_ms)? {
+        if !poll_stdin_readable(remaining_ms)? {
             // `poll` timed out; loop back around to the deadline check above
             // rather than trusting `remaining_ms` twice.
             continue;
@@ -273,6 +295,42 @@ mod tests {
         assert_eq!(
             detection.unwrap().capabilities(),
             KeyboardCapabilities::legacy()
+        );
+    }
+
+    #[test]
+    fn win32_input_mode_resolves_modern() {
+        let mut probe = CapabilityProbe::arm(Instant::now() + Duration::from_millis(500));
+        let detection = probe.on_event(&InputEvent::Win32InputMode);
+        assert_eq!(detection, Some(CapabilityDetection::Win32InputMode));
+        assert_eq!(
+            detection.unwrap().capabilities(),
+            KeyboardCapabilities::modern()
+        );
+    }
+
+    /// Windows probe policy (TASK-260713): a DA1 reply alone must not
+    /// resolve legacy, because win32-input-mode evidence may still follow —
+    /// only the timeout or a win32/kitty signal decides.
+    #[test]
+    fn da1_does_not_resolve_when_policy_defers_it() {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut probe = CapabilityProbe::with_da1_policy(deadline, false);
+        assert_eq!(probe.on_event(&InputEvent::DeviceAttributes), None);
+
+        // win32 evidence arriving later still wins ...
+        assert_eq!(
+            probe.on_event(&InputEvent::Win32InputMode),
+            Some(CapabilityDetection::Win32InputMode)
+        );
+
+        // ... and without it, the deadline resolves legacy as usual.
+        let mut timeout_probe = CapabilityProbe::with_da1_policy(Instant::now(), false);
+        assert_eq!(timeout_probe.on_event(&InputEvent::DeviceAttributes), None);
+        std::thread::sleep(Duration::from_millis(1));
+        assert_eq!(
+            timeout_probe.on_tick(Instant::now()),
+            Some(CapabilityDetection::LegacyTimeout)
         );
     }
 

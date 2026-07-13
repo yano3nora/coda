@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     input::{
         InputEvent, Key, KeyEvent, KeyboardProtocolGuard, Modifiers, RawModeGuard,
-        drain_input_events, flush_pending_escape, poll_readable,
+        drain_input_events, flush_pending_escape, poll_stdin_readable,
         quirks::{self, TerminalQuirk, suggest_ghostty_fix},
     },
     keymap::{Binding, Source, format_key_for_config},
@@ -389,7 +389,7 @@ fn run_interactive(mut session: VerifySession) -> io::Result<VerifySession> {
         // sequence. Only a timeout can disambiguate it — same reasoning as
         // the editor event loop's `flush_pending_escape` path.
         let mut keys: Vec<KeyEvent> = Vec::new();
-        if poll_readable(libc::STDIN_FILENO, ESC_FLUSH_POLL_MS)? {
+        if poll_stdin_readable(ESC_FLUSH_POLL_MS)? {
             let read = stdin.read(&mut chunk)?;
             if read == 0 {
                 write_raw_line(&mut stdout, "stdin closed; stopping")?;

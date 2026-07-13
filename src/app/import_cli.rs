@@ -74,11 +74,10 @@ fn supports_color(is_tty: bool, no_color: Option<&std::ffi::OsStr>) -> bool {
     is_tty && no_color_allows_color(no_color)
 }
 
-/// Mirrors the `libc::isatty` precedent in `src/input/capabilities.rs`, but
-/// checks stdout specifically (the report is printed there; stdin's TTY-ness
+/// Checks stdout specifically (the report is printed there; stdin's TTY-ness
 /// is irrelevant to whether stdout is colorized).
 fn stdout_is_tty() -> bool {
-    unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
+    crate::input::tty::stdout_is_tty()
 }
 
 /// NO_COLOR convention (https://no-color.org/): color is disabled only when
@@ -169,6 +168,9 @@ fn capability_report_line(detection: CapabilityDetection) -> String {
         CapabilityDetection::KittyFlags(flags) if flags & 1 != 0 => {
             format!("Terminal capability: modern (kitty CSI u, flags={flags})")
         }
+        CapabilityDetection::Win32InputMode => {
+            "Terminal capability: modern (win32-input-mode)".to_string()
+        }
         CapabilityDetection::AssumedModern => {
             "Terminal capability: not detected (not an interactive terminal); assuming modern"
                 .to_string()
@@ -181,7 +183,12 @@ pub(crate) fn config_base_dir() -> Option<PathBuf> {
     if let Some(base) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(base).join("coda"));
     }
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("coda"))
+    // Windows has no HOME by default; USERPROFILE is its equivalent. The
+    // layout stays `~/.config/coda` on every platform so docs and muscle
+    // memory don't fork per OS (%APPDATA% compliance deferred, TASK-260713).
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".config").join("coda"))
 }
 
 pub(crate) fn write_parented(path: &Path, bytes: &[u8]) -> io::Result<()> {

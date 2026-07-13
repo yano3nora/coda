@@ -6,11 +6,12 @@ use std::collections::HashSet;
 // .goreleaser.yaml の builds[].targets と同期させること。
 // goreleaser (cargo zigbuild) はここに挙げた rustup target が未導入だと途中で失敗するため、
 // prepare の冒頭で不足を明示的に検出して導入手順つきで fail させる
-pub const RUST_TARGETS: [&str; 4] = [
+pub const RUST_TARGETS: [&str; 5] = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
+    "x86_64-pc-windows-gnu",
 ];
 
 pub fn assert_release_toolchain() -> Result<(), String> {

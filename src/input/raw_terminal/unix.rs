@@ -1,8 +1,5 @@
-//! RAII terminal raw mode guard.
-//!
-//! Uses the `libc` crate for termios so platform-specific struct layouts are
-//! not maintained by hand. This module is intentionally scoped to `input`;
-//! raw terminal state must not leak to other layers.
+//! Unix raw mode: termios via the `libc` crate (platform-specific struct
+//! layouts are not maintained by hand) + signal-based restore.
 
 use std::{
     io,
@@ -19,57 +16,20 @@ use libc::{
     SIGHUP, SIGINT, SIGQUIT, SIGTERM, STDIN_FILENO, TCSAFLUSH, VMIN, VTIME, termios as Termios,
 };
 
+use super::CLEANUP_STEPS;
+
 static INSTALL_SIGNAL_HANDLERS: Once = Once::new();
 static SIGNAL_RESTORE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SIGNAL_RESTORE_FD: AtomicI32 = AtomicI32::new(-1);
 static mut SIGNAL_RESTORE_TERMIOS: MaybeUninit<Termios> = MaybeUninit::uninit();
-static KEYBOARD_PROTOCOL_PUSHED: AtomicBool = AtomicBool::new(false);
-static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
-static BRACKETED_PASTE_ACTIVE: AtomicBool = AtomicBool::new(false);
-static MOUSE_REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// kitty keyboard protocol: pop the flags we pushed (`CSI < u`).
-const KITTY_POP: &[u8] = b"\x1b[<u";
-/// Alternate screen: show cursor and return to the main screen.
-const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?25h\x1b[?1049l";
-/// Bracketed paste mode: disable paste envelopes before returning to the shell.
-const BRACKETED_PASTE_DISABLE: &[u8] = b"\x1b[?2004l";
-/// SGR mouse reporting: stop the terminal from sending mouse sequences into
-/// the user's shell after an abnormal exit (ADR-0008).
-const MOUSE_REPORTING_DISABLE: &[u8] = b"\x1b[?1006l\x1b[?1002l";
-
-/// Tracks whether a kitty protocol mode was pushed, so the signal handler can
-/// pop it before exiting. Leaving the mode pushed would corrupt the shell's
-/// key handling after an abnormal exit.
-pub(crate) fn set_keyboard_protocol_pushed(pushed: bool) {
-    KEYBOARD_PROTOCOL_PUSHED.store(pushed, Ordering::SeqCst);
-}
-
-/// Tracks whether alternate screen mode is active, so the signal handler can
-/// restore the user's shell view before keyboard protocol and termios cleanup.
-pub(crate) fn set_alt_screen_active(active: bool) {
-    ALT_SCREEN_ACTIVE.store(active, Ordering::SeqCst);
-}
-
-/// Tracks whether bracketed paste mode is active, so abnormal exits do not
-/// leave the user's shell wrapping future paste operations in CSI 200/201.
-pub(crate) fn set_bracketed_paste_active(active: bool) {
-    BRACKETED_PASTE_ACTIVE.store(active, Ordering::SeqCst);
-}
-
-/// Tracks whether SGR mouse reporting is active, so abnormal exits do not
-/// leave the user's shell receiving mouse escape sequences.
-pub(crate) fn set_mouse_reporting_active(active: bool) {
-    MOUSE_REPORTING_ACTIVE.store(active, Ordering::SeqCst);
-}
-
-/// Waits until `fd` has input available, or until `timeout_ms` elapses.
+/// Waits until stdin has input available, or until `timeout_ms` elapses.
 ///
 /// Callers own decoding and timeout policy; this wrapper only keeps the
 /// terminal-specific readiness API inside the input layer.
-pub(crate) fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+pub(crate) fn poll_stdin_readable(timeout_ms: i32) -> io::Result<bool> {
     let mut fds = [libc::pollfd {
-        fd,
+        fd: STDIN_FILENO,
         events: libc::POLLIN,
         revents: 0,
     }];
@@ -166,36 +126,13 @@ fn disarm_signal_restore() {
 }
 
 extern "C" fn restore_then_exit(signal_number: libc::c_int) {
-    // Only async-signal-safe calls are allowed here (write / tcsetattr / _exit are).
-    // Pop the keyboard protocol BEFORE leaving the alternate screen: kitty
-    // tracks the keyboard mode stack per screen, and the editor pushes its
-    // mode on the alternate screen (see EventLoop::run).
-    if MOUSE_REPORTING_ACTIVE.load(Ordering::SeqCst) {
-        unsafe {
-            libc::write(
-                1,
-                MOUSE_REPORTING_DISABLE.as_ptr().cast(),
-                MOUSE_REPORTING_DISABLE.len(),
-            );
-        }
-    }
-    if BRACKETED_PASTE_ACTIVE.load(Ordering::SeqCst) {
-        unsafe {
-            libc::write(
-                1,
-                BRACKETED_PASTE_DISABLE.as_ptr().cast(),
-                BRACKETED_PASTE_DISABLE.len(),
-            );
-        }
-    }
-    if KEYBOARD_PROTOCOL_PUSHED.load(Ordering::SeqCst) {
-        unsafe {
-            libc::write(1, KITTY_POP.as_ptr().cast(), KITTY_POP.len());
-        }
-    }
-    if ALT_SCREEN_ACTIVE.load(Ordering::SeqCst) {
-        unsafe {
-            libc::write(1, ALT_SCREEN_LEAVE.as_ptr().cast(), ALT_SCREEN_LEAVE.len());
+    // Only async-signal-safe calls are allowed here (write / tcsetattr / _exit
+    // are). CLEANUP_STEPS is a const table, so no allocation happens either.
+    for (active, sequence) in CLEANUP_STEPS {
+        if active.load(Ordering::SeqCst) {
+            unsafe {
+                libc::write(1, sequence.as_ptr().cast(), sequence.len());
+            }
         }
     }
     if SIGNAL_RESTORE_ACTIVE.load(Ordering::SeqCst) {

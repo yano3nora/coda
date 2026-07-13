@@ -19,7 +19,7 @@ coda
 
 ### Supported platforms
 
-macOS and Linux (Windows is not supported). Tested mainly on Ghostty and kitty-family terminals.
+macOS, Linux, and Windows. Tested mainly on Ghostty and kitty-family terminals. On Windows, a ConPTY-based terminal is required (Windows Terminal recommended; modifier fidelity via win32-input-mode) — legacy conhost is rejected at startup.
 
 ## Installation
 
@@ -31,7 +31,7 @@ Install a pinned version with the GitHub backend of [mise](https://mise.jdx.dev/
 mise use -g github:yano3nora/coda
 ```
 
-Or manually from [Releases](https://github.com/yano3nora/coda/releases). Assets are named `coda-v<version>-<os>-<arch>.tar.gz` (a single `coda` binary at the archive root) with a separate `.sha256` each:
+Or manually from [Releases](https://github.com/yano3nora/coda/releases). Assets are named `coda-v<version>-<os>-<arch>.tar.gz` (`.zip` on Windows; a single `coda` binary at the archive root) with a separate `.sha256` each:
 
 ```sh
 curl -LO https://github.com/yano3nora/coda/releases/download/v0.1.0/coda-v0.1.0-macos-arm64.tar.gz
@@ -46,8 +46,9 @@ Available assets:
 | `macos-x64` | macOS (Intel) |
 | `linux-arm64` | Linux aarch64 (glibc 2.17+) |
 | `linux-x64` | Linux x86_64 (glibc 2.17+) |
+| `windows-x64` | Windows x86_64 (Windows Terminal / ConPTY, `.zip`) |
 
-Linux binaries are built against glibc 2.17 (zig linker). No musl static binary is provided, so glibc-based distros (Ubuntu / Debian / RHEL 7+ etc.) are the target.
+Linux binaries are built against glibc 2.17 (zig linker). No musl static binary is provided, so glibc-based distros (Ubuntu / Debian / RHEL 7+ etc.) are the target. The Windows binary is unsigned, so SmartScreen may warn on first run.
 
 ### Bootstrap on SSH / container hosts
 
@@ -179,7 +180,7 @@ mise run pre-commit   # fmt --check / clippy -D warnings / test
 
 v0.1 ships as **single binaries for macOS / Linux on GitHub Releases** only. crates.io / Homebrew / automated publishing will be considered after manual releases stabilize the asset naming and install UX.
 
-Releases use goreleaser (compile / archive / checksum / Release creation) plus `cargo xtask` (`xtask/`; version bump / validation / human-only publish gate). Cross builds use `cargo zigbuild` to produce all 4 targets (macOS / Linux × x64 / arm64) from a macOS host. `mise install` provides the toolchain (zig / cargo-zigbuild / goreleaser).
+Releases use goreleaser (compile / archive / checksum / Release creation) plus `cargo xtask` (`xtask/`; version bump / validation / human-only publish gate). Cross builds use `cargo zigbuild` to produce all 5 targets (macOS / Linux × x64 / arm64, plus Windows x64 gnu) from a macOS host. `mise install` provides the toolchain (zig / cargo-zigbuild / goreleaser).
 
 Manual release procedure:
 

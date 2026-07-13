@@ -7,14 +7,25 @@ members = ["xtask"]
 
 [package]
 name = "coda"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
-libc = "0.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 toml = "1.1.2"
 unicode-segmentation = "1"
 unicode-width = "0.2"
+
+# terminal 依存は platform ごとに分離する (docs/TASK-260713-windows-minimal-distribution.md)。
+# unix: termios / poll / signal を libc で。windows: Console API を windows-sys で
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }

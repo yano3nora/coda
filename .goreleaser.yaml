@@ -36,6 +36,19 @@ builds:
       - --release
       # 理由は darwin build の同コメント参照
       - --package=coda
+  # Windows (gnu): msvc toolchain は macOS host から link できないため gnu 一択。
+  # cargo zigbuild が windows-sys の Console API 込みで PE binary を link できることは
+  # 実証済み (docs/TASK-260713-windows-minimal-distribution.md)。動作対象は
+  # Windows Terminal (ConPTY) のみで、legacy conhost は起動時に明示 error とする
+  - id: windows
+    builder: rust
+    binary: coda
+    targets:
+      - x86_64-pc-windows-gnu
+    flags:
+      - --release
+      # 理由は darwin build の同コメント参照
+      - --package=coda
 
 archives:
   # mise の GitHub backend (`mise use github:yano3nora/coda@<version>`) が OS / arch を
@@ -43,6 +56,10 @@ archives:
   - name_template: >-
       {{ .ProjectName }}-v{{ .Version }}-{{ if eq .Os "darwin" }}macos{{ else }}{{ .Os }}{{ end }}-{{ if eq .Arch "amd64" }}x64{{ else }}{{ .Arch }}{{ end }}
     formats: [tar.gz]
+    # Windows だけ zip (PowerShell 標準で展開でき、mise も zip を扱える)
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     # archive にはバイナリのみ含める (README 等を同梱しない)。展開直下に coda が置かれる形
     files:
       - none*

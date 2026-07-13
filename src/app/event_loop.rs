@@ -7,7 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use libc::STDIN_FILENO;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
@@ -18,7 +17,7 @@ use crate::{
         BracketedPasteGuard, CapabilityDetection, CapabilityProbe, InputEvent, Key, KeyEvent,
         KeyboardCapabilities, KeyboardProtocolGuard, Modifiers, MouseButton, MouseEvent,
         MouseEventKind, MouseReportingGuard, RawModeGuard, drain_input_events,
-        flush_pending_escape, poll_readable,
+        flush_pending_escape, poll_stdin_readable,
         quirks::{self, QuirkEffect, TerminalQuirk},
     },
     keymap::{EditorAction, EditorContext, ResolveResult, Resolver},
@@ -373,7 +372,7 @@ impl EventLoop {
             prev = next;
 
             let timeout = self.poll_timeout_ms();
-            if poll_readable(STDIN_FILENO, timeout)? {
+            if poll_stdin_readable(timeout)? {
                 let mut chunk = [0_u8; 256];
                 let read = stdin.read(&mut chunk)?;
                 if read == 0 {
@@ -493,7 +492,9 @@ impl EventLoop {
             InputEvent::Key(key) => self.handle_key(key),
             InputEvent::Paste(text) => self.handle_paste_input(&text),
             InputEvent::Mouse(mouse) => self.handle_mouse_event(mouse),
-            InputEvent::CapabilityReply(_) | InputEvent::DeviceAttributes => {
+            InputEvent::CapabilityReply(_)
+            | InputEvent::DeviceAttributes
+            | InputEvent::Win32InputMode => {
                 self.feed_capability_probe(&event);
                 QuitDecision::Continue
             }

@@ -34,6 +34,11 @@ pub enum InputEvent {
     /// key channel so mouse motion can never look like a keystroke to the
     /// resolver (SPEC-0003).
     Mouse(MouseEvent),
+    /// At least one win32-input-mode sequence (`CSI ..._`, TASK-260713) was
+    /// seen in this chunk. Emitted once per drained chunk as capability
+    /// evidence: the terminal honored our `CSI ?9001h` request, so modifier
+    /// fidelity is available. Not a keystroke.
+    Win32InputMode,
 }
 
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -70,7 +75,8 @@ pub fn drain_key_events(buffer: &mut Vec<u8>) -> Vec<KeyEvent> {
             InputEvent::Paste(_)
             | InputEvent::CapabilityReply(_)
             | InputEvent::DeviceAttributes
-            | InputEvent::Mouse(_) => None,
+            | InputEvent::Mouse(_)
+            | InputEvent::Win32InputMode => None,
         })
         .collect()
 }
@@ -83,8 +89,17 @@ pub fn drain_key_events(buffer: &mut Vec<u8>) -> Vec<KeyEvent> {
 /// arrived yet, the whole paste prefix is retained for the next read chunk.
 pub fn drain_input_events(buffer: &mut Vec<u8>) -> Vec<InputEvent> {
     let mut events = Vec::new();
-    let mut offset = 0;
 
+    // win32-input-mode pre-pass (TASK-260713): conhost/ConPTY may deliver
+    // query responses as injected key events. Unwrap them back into plain
+    // bytes BEFORE ordinary decoding so a wrapped `CSI ?...c` reassembles
+    // into the DA1 reply it actually is. Seeing any win32 sequence at all is
+    // capability evidence, surfaced as one non-key event per chunk.
+    if unwrap_win32_injected(buffer) {
+        events.push(InputEvent::Win32InputMode);
+    }
+
+    let mut offset = 0;
     while offset < buffer.len() {
         let remaining = &buffer[offset..];
         if remaining.starts_with(BRACKETED_PASTE_START) {
@@ -105,6 +120,15 @@ pub fn drain_input_events(buffer: &mut Vec<u8>) -> Vec<InputEvent> {
                 events.push(event);
                 offset += consumed;
             }
+            // win32 key-repeat: the same keystroke `count` times (Rc field).
+            One::Repeated(event, count, consumed) => {
+                for _ in 0..count {
+                    events.push(event.clone());
+                }
+                offset += consumed;
+            }
+            // Complete but eventless input (win32 key-up, modifier-only key).
+            One::Skip(consumed) => offset += consumed,
             One::Incomplete => break,
         }
     }
@@ -143,6 +167,10 @@ fn normalize_paste_text(bytes: &[u8]) -> String {
 
 enum One {
     Event(InputEvent, usize),
+    /// One key event repeated N times in `usize` consumed bytes (win32 Rc).
+    Repeated(InputEvent, u16, usize),
+    /// Complete input that produces no event (win32 key-up / modifier-only).
+    Skip(usize),
     Incomplete,
 }
 
@@ -192,6 +220,8 @@ fn decode_escape(bytes: &[u8]) -> One {
             // stay exhaustive; pass the event through unmodified instead of
             // asserting an unreachable case.
             One::Event(other, consumed) => One::Event(other, consumed + 1),
+            One::Repeated(event, count, consumed) => One::Repeated(event, count, consumed + 1),
+            One::Skip(consumed) => One::Skip(consumed + 1),
             One::Incomplete => One::Incomplete,
         },
     }
@@ -227,6 +257,12 @@ fn decode_csi(bytes: &[u8]) -> One {
 
             if final_byte == b'u' {
                 return decode_kitty_csi_u(params, bytes, consumed);
+            }
+
+            // win32-input-mode key event (`CSI Vk;Sc;Uc;Kd;Cs;Rc _`,
+            // TASK-260713). Sent by Windows Terminal after `CSI ?9001h`.
+            if final_byte == b'_' {
+                return decode_win32_key(params, bytes, consumed);
             }
 
             if let Some(event) = decode_legacy_csi(params, final_byte) {
@@ -452,6 +488,343 @@ fn decode_kitty_csi_u(params: &[u8], bytes: &[u8], consumed: usize) -> One {
     };
 
     key_event(KeyEvent::new(key, modifiers), consumed)
+}
+
+/// Parsed fields of a win32-input-mode sequence (`CSI Vk;Sc;Uc;Kd;Cs;Rc _`,
+/// microsoft/terminal spec #4999). `Sc` (scan code) is layout hardware detail
+/// the normalized event never needs, so it is parsed but dropped.
+struct Win32KeyParams {
+    /// Virtual key code (`wVirtualKeyCode`). 0 marks an injected event: the
+    /// console host writing a query response into the input stream.
+    vk: u16,
+    /// UTF-16 code unit of the character (`UnicodeChar`), 0 for non-character
+    /// keys. Astral-plane characters arrive as a surrogate pair split across
+    /// two consecutive sequences.
+    uc: u16,
+    key_down: bool,
+    /// `dwControlKeyState` bitmask.
+    control: u32,
+    repeat: u16,
+}
+
+const WIN32_RIGHT_ALT: u32 = 0x0001;
+const WIN32_LEFT_ALT: u32 = 0x0002;
+const WIN32_RIGHT_CTRL: u32 = 0x0004;
+const WIN32_LEFT_CTRL: u32 = 0x0008;
+const WIN32_SHIFT: u32 = 0x0010;
+
+/// Upper bound for honoring the win32 repeat count. Real coalesced key
+/// repeat is small; a damaged sequence claiming 65535 repeats must not flood
+/// the editor with phantom keystrokes.
+const WIN32_REPEAT_CAP: u16 = 64;
+
+impl Win32KeyParams {
+    /// All params are optional and empty params keep their default (0,
+    /// except repeat which defaults to 1), per the win32-input-mode spec.
+    fn parse(params: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(params).ok()?;
+        let mut values: [u32; 6] = [0, 0, 0, 0, 0, 1];
+        if !text.is_empty() {
+            for (index, part) in text.split(';').enumerate() {
+                if index >= values.len() {
+                    return None;
+                }
+                if !part.is_empty() {
+                    values[index] = part.parse::<u32>().ok()?;
+                }
+            }
+        }
+        Some(Self {
+            vk: u16::try_from(values[0]).ok()?,
+            uc: u16::try_from(values[2]).ok()?,
+            key_down: values[3] != 0,
+            control: values[4],
+            repeat: u16::try_from(values[5]).ok()?,
+        })
+    }
+
+    fn modifiers(&self) -> Modifiers {
+        let mut modifiers = Modifiers::none();
+        if self.control & (WIN32_RIGHT_CTRL | WIN32_LEFT_CTRL) != 0 {
+            modifiers = modifiers.with_ctrl();
+        }
+        if self.control & (WIN32_RIGHT_ALT | WIN32_LEFT_ALT) != 0 {
+            modifiers = modifiers.with_alt();
+        }
+        if self.control & WIN32_SHIFT != 0 {
+            modifiers = modifiers.with_shift();
+        }
+        modifiers
+    }
+
+    /// AltGr arrives as RightAlt+LeftCtrl on Windows. A character typed via
+    /// AltGr (e.g. `@` on many non-US layouts) is text input, not a
+    /// Ctrl+Alt chord — treating it as one would make those characters
+    /// untypeable.
+    fn is_alt_gr(&self) -> bool {
+        self.control & (WIN32_RIGHT_ALT | WIN32_LEFT_CTRL) == (WIN32_RIGHT_ALT | WIN32_LEFT_CTRL)
+    }
+
+    /// The console host injects query responses (DA1 etc.) into the input
+    /// stream as key events with no virtual key. Their `uc` values are the
+    /// response's characters, one event per character. Surrogate halves are
+    /// excluded: `vk=0` also occurs for IME/SendInput text, and an astral
+    /// character split across two events must reach the key path's surrogate
+    /// pairing instead of being spliced away (Codex review 260713).
+    fn is_injected_text(&self) -> bool {
+        self.vk == 0
+            && self.key_down
+            && self.uc != 0
+            && !is_high_surrogate(self.uc)
+            && !is_low_surrogate(self.uc)
+    }
+}
+
+fn is_high_surrogate(unit: u16) -> bool {
+    (0xd800..=0xdbff).contains(&unit)
+}
+
+fn is_low_surrogate(unit: u16) -> bool {
+    (0xdc00..=0xdfff).contains(&unit)
+}
+
+fn combine_surrogates(high: u16, low: u16) -> Option<char> {
+    let code = 0x10000 + ((u32::from(high) - 0xd800) << 10) + (u32::from(low) - 0xdc00);
+    char::from_u32(code)
+}
+
+/// Virtual keys that never produce a key event on their own: pressing and
+/// releasing a modifier or lock key is not a keystroke to bind.
+fn is_modifier_only_vk(vk: u16) -> bool {
+    matches!(
+        vk,
+        0x10 | 0x11 | 0x12          // VK_SHIFT / VK_CONTROL / VK_MENU
+            | 0x14                  // VK_CAPITAL
+            | 0x5b | 0x5c           // VK_LWIN / VK_RWIN
+            | 0x90 | 0x91           // VK_NUMLOCK / VK_SCROLL
+            | 0xa0..=0xa5 // VK_LSHIFT..VK_RMENU
+    )
+}
+
+/// Non-character virtual keys with a dedicated `Key` variant. Checked before
+/// the character path because Ctrl mangles their `uc` (Ctrl+Enter arrives
+/// with uc=0x0a) while `vk` stays stable — this is exactly the fidelity
+/// kitty CSI u provides on unix (supports_ctrl_enter etc., SPEC-0003).
+fn named_vk_key(vk: u16) -> Option<Key> {
+    Some(match vk {
+        0x08 => Key::Backspace,
+        0x09 => Key::Tab,
+        0x0d => Key::Enter,
+        0x1b => Key::Esc,
+        0x21 => Key::PageUp,
+        0x22 => Key::PageDown,
+        0x23 => Key::End,
+        0x24 => Key::Home,
+        0x25 => Key::Left,
+        0x26 => Key::Up,
+        0x27 => Key::Right,
+        0x28 => Key::Down,
+        0x2e => Key::Delete,
+        0x70..=0x7b => Key::F((vk - 0x6f) as u8),
+        _ => return None,
+    })
+}
+
+fn decode_win32_key(params: &[u8], bytes: &[u8], consumed: usize) -> One {
+    let unknown = || {
+        key_event(
+            KeyEvent::plain(Key::Unknown(bytes[..consumed].to_vec())),
+            consumed,
+        )
+    };
+    let Some(win32) = Win32KeyParams::parse(params) else {
+        return unknown();
+    };
+
+    // Key-up and bare modifier presses are stream noise, not keystrokes.
+    if !win32.key_down || is_modifier_only_vk(win32.vk) {
+        return One::Skip(consumed);
+    }
+    // Injected response text is normally unwrapped by the pre-pass in
+    // `drain_input_events`; a stray remnant here is still not a keystroke.
+    if win32.vk == 0 && win32.uc == 0 {
+        return One::Skip(consumed);
+    }
+
+    if let Some(key) = named_vk_key(win32.vk) {
+        return repeated_key(
+            KeyEvent::new(key, win32.modifiers()),
+            win32.repeat,
+            consumed,
+        );
+    }
+
+    // Surrogate pair: the low half arrives as the immediately following
+    // win32 sequence. Wait for it rather than emitting half a character.
+    if is_high_surrogate(win32.uc) {
+        return match next_win32_sequence(&bytes[consumed..]) {
+            NextWin32::Incomplete => One::Incomplete,
+            NextWin32::Complete(next, next_len) => {
+                match (next.key_down, combine_surrogates(win32.uc, next.uc)) {
+                    (true, Some(character)) if is_low_surrogate(next.uc) => repeated_key(
+                        KeyEvent::new(Key::Char(character), win32.modifiers()),
+                        win32.repeat,
+                        consumed + next_len,
+                    ),
+                    // Unpaired high surrogate: drop it, leave the follower
+                    // for the main loop to judge on its own.
+                    _ => One::Skip(consumed),
+                }
+            }
+            NextWin32::NotWin32 => One::Skip(consumed),
+        };
+    }
+    if is_low_surrogate(win32.uc) {
+        return One::Skip(consumed);
+    }
+
+    let character = char::from_u32(u32::from(win32.uc)).filter(|c| !c.is_control());
+    let event = match character {
+        Some(character) => {
+            // Same normalization as kitty CSI u: letters are stored
+            // lowercase with Shift kept as a modifier. AltGr characters are
+            // plain text input (see is_alt_gr).
+            let modifiers = if win32.is_alt_gr() {
+                Modifiers::none()
+            } else {
+                win32.modifiers()
+            };
+            KeyEvent::new(Key::Char(character.to_ascii_lowercase()), modifiers)
+        }
+        None => {
+            // Ctrl mangled `uc` into a control byte (Ctrl+A → 0x01) or the
+            // key carries no character at all. Recover letters/digits/space
+            // from the virtual key; anything else stays explainable as
+            // Unknown for `:inspect-key`.
+            let recovered = match win32.vk {
+                0x20 => Some(' '),
+                0x30..=0x39 => char::from_u32(u32::from(win32.vk)),
+                0x41..=0x5a => char::from_u32(u32::from(win32.vk) + 0x20),
+                _ => None,
+            };
+            match recovered {
+                Some(character) => KeyEvent::new(Key::Char(character), win32.modifiers()),
+                None => return unknown(),
+            }
+        }
+    };
+    repeated_key(event, win32.repeat, consumed)
+}
+
+fn repeated_key(event: KeyEvent, repeat: u16, consumed: usize) -> One {
+    let count = repeat.clamp(1, WIN32_REPEAT_CAP);
+    if count == 1 {
+        key_event(event, consumed)
+    } else {
+        One::Repeated(InputEvent::Key(event), count, consumed)
+    }
+}
+
+enum NextWin32 {
+    Complete(Win32KeyParams, usize),
+    Incomplete,
+    NotWin32,
+}
+
+/// Peeks the next complete win32 sequence at the start of `bytes` (surrogate
+/// pairing). `Incomplete` when the follower may still be arriving.
+fn next_win32_sequence(bytes: &[u8]) -> NextWin32 {
+    if bytes.is_empty() || (bytes.len() == 1 && bytes[0] == 0x1b) {
+        return NextWin32::Incomplete;
+    }
+    if !bytes.starts_with(b"\x1b[") {
+        return NextWin32::NotWin32;
+    }
+    let Some(final_index) = bytes
+        .iter()
+        .enumerate()
+        .skip(2)
+        .find_map(|(index, byte)| (0x40..=0x7e).contains(byte).then_some(index))
+    else {
+        return NextWin32::Incomplete;
+    };
+    if bytes[final_index] != b'_' {
+        return NextWin32::NotWin32;
+    }
+    match Win32KeyParams::parse(&bytes[2..final_index]) {
+        Some(params) => NextWin32::Complete(params, final_index + 1),
+        None => NextWin32::NotWin32,
+    }
+}
+
+/// Rewrites console-host-injected win32 events (query responses wrapped as
+/// `vk=0` key events, one per character) back into the plain bytes they
+/// carry, so a wrapped DA1 reply reassembles into `CSI ?...c` and decodes
+/// through the ordinary paths. Returns whether ANY complete win32 sequence
+/// (injected or real) was seen — the capability evidence for
+/// `InputEvent::Win32InputMode`. Bracketed-paste envelopes are skipped
+/// verbatim: their content is literal text that must never be rewritten.
+fn unwrap_win32_injected(buffer: &mut Vec<u8>) -> bool {
+    let mut saw_win32 = false;
+    let mut index = 0;
+
+    while index < buffer.len() {
+        let remaining = &buffer[index..];
+        if remaining.starts_with(BRACKETED_PASTE_START) {
+            let content_start = index + BRACKETED_PASTE_START.len();
+            match find_subslice(&buffer[content_start..], BRACKETED_PASTE_END) {
+                Some(relative_end) => {
+                    index = content_start + relative_end + BRACKETED_PASTE_END.len();
+                    continue;
+                }
+                // Incomplete paste envelope: everything after it is paste
+                // content still in flight; nothing left to unwrap this chunk.
+                None => break,
+            }
+        }
+        if remaining.len() >= 2 && remaining[0] == 0x1b && remaining[1] == b'[' {
+            let Some(final_index) = remaining
+                .iter()
+                .enumerate()
+                .skip(2)
+                .find_map(|(offset, byte)| (0x40..=0x7e).contains(byte).then_some(offset))
+            else {
+                // Incomplete CSI at the tail: keep for the next chunk.
+                break;
+            };
+            let sequence_len = final_index + 1;
+            if remaining[final_index] == b'_'
+                && let Some(params) = Win32KeyParams::parse(&remaining[2..final_index])
+            {
+                // Only a parseable sequence counts as capability evidence: a
+                // malformed `_`-final CSI must not upgrade the terminal to
+                // "full fidelity" (Codex review 260713).
+                saw_win32 = true;
+                if params.is_injected_text() {
+                    // Injected units are response text (surrogate halves are
+                    // excluded by is_injected_text and take the key path's
+                    // surrogate pairing instead).
+                    let replacement: Vec<u8> = char::from_u32(u32::from(params.uc))
+                        .map(|character| {
+                            let mut buf = [0_u8; 4];
+                            let encoded = character.encode_utf8(&mut buf).as_bytes().to_vec();
+                            let count = usize::from(params.repeat.clamp(1, WIN32_REPEAT_CAP));
+                            encoded.repeat(count)
+                        })
+                        .unwrap_or_default();
+                    let replacement_len = replacement.len();
+                    buffer.splice(index..index + sequence_len, replacement);
+                    index += replacement_len;
+                    continue;
+                }
+            }
+            index += sequence_len;
+            continue;
+        }
+        index += 1;
+    }
+
+    saw_win32
 }
 
 fn decode_utf8_or_unknown(bytes: &[u8]) -> One {
@@ -838,6 +1211,202 @@ mod tests {
         assert_eq!(
             drain_input_events(&mut buffer),
             vec![InputEvent::CapabilityReply(1)]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    /// Table-driven win32-input-mode decode (TASK-260713): `CSI ..._` key
+    /// events from Windows Terminal after `CSI ?9001h`. Every chunk that
+    /// contains a win32 sequence also announces `Win32InputMode` once as
+    /// capability evidence.
+    #[test]
+    fn decode_win32_input_mode_table_driven() {
+        fn key(event: KeyEvent) -> InputEvent {
+            InputEvent::Key(event)
+        }
+
+        let cases: &[(&str, &[u8], Vec<InputEvent>)] = &[
+            (
+                "plain letter (numlock bit ignored)",
+                b"\x1b[65;30;97;1;32;1_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::plain(Key::Char('a'))),
+                ],
+            ),
+            (
+                "key-up produces no keystroke",
+                b"\x1b[65;30;97;0;32;1_",
+                vec![InputEvent::Win32InputMode],
+            ),
+            (
+                "Ctrl+Shift+J (uc mangled to 0x0a, letter recovered from vk)",
+                b"\x1b[74;36;10;1;24;1_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::new(
+                        Key::Char('j'),
+                        Modifiers::ctrl().with_shift(),
+                    )),
+                ],
+            ),
+            (
+                "Ctrl+I stays a letter, distinguished from Tab",
+                b"\x1b[73;23;9;1;8;1_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::new(Key::Char('i'), Modifiers::ctrl())),
+                ],
+            ),
+            (
+                "Tab itself resolves via the named vk table",
+                b"\x1b[9;15;9;1;0;1_",
+                vec![InputEvent::Win32InputMode, key(KeyEvent::plain(Key::Tab))],
+            ),
+            (
+                "Ctrl+Enter (vk wins over the mangled uc)",
+                b"\x1b[13;28;10;1;8;1_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::new(Key::Enter, Modifiers::ctrl())),
+                ],
+            ),
+            (
+                "Shift+Enter",
+                b"\x1b[13;28;13;1;16;1_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::new(Key::Enter, Modifiers::shift())),
+                ],
+            ),
+            (
+                "AltGr character is text input, not a Ctrl+Alt chord",
+                b"\x1b[81;16;64;1;9;1_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::plain(Key::Char('@'))),
+                ],
+            ),
+            (
+                "modifier-only press (Shift down) produces no keystroke",
+                b"\x1b[16;42;0;1;16;1_",
+                vec![InputEvent::Win32InputMode],
+            ),
+            (
+                "repeat count replays the keystroke",
+                b"\x1b[65;30;97;1;0;3_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::plain(Key::Char('a'))),
+                    key(KeyEvent::plain(Key::Char('a'))),
+                    key(KeyEvent::plain(Key::Char('a'))),
+                ],
+            ),
+            (
+                "arrow key via vk (uc is 0)",
+                b"\x1b[38;72;0;1;0;1_",
+                vec![InputEvent::Win32InputMode, key(KeyEvent::plain(Key::Up))],
+            ),
+            (
+                "function key via vk",
+                b"\x1b[116;63;0;1;0;1_",
+                vec![InputEvent::Win32InputMode, key(KeyEvent::plain(Key::F(5)))],
+            ),
+            (
+                "surrogate pair combines into one astral character",
+                b"\x1b[231;0;55357;1;0;1_\x1b[231;0;56832;1;0;1_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::plain(Key::Char('\u{1f600}'))),
+                ],
+            ),
+            (
+                "vk=0 surrogate pair (IME-injected text) is NOT unwrapped away",
+                b"\x1b[0;0;55357;1;0;1_\x1b[0;0;56832;1;0;1_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::plain(Key::Char('\u{1f600}'))),
+                ],
+            ),
+            (
+                "key without character or named vk stays explainable",
+                b"\x1b[45;82;0;1;0;1_",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::plain(Key::Unknown(
+                        b"\x1b[45;82;0;1;0;1_".to_vec(),
+                    ))),
+                ],
+            ),
+            (
+                "empty params are all defaults (key-up), not an error",
+                b"\x1b[_",
+                vec![InputEvent::Win32InputMode],
+            ),
+            (
+                "injected DA1 reply unwraps back into DeviceAttributes",
+                b"\x1b[0;0;27;1;0;1_\x1b[0;0;91;1;0;1_\x1b[0;0;63;1;0;1_\x1b[0;0;54;1;0;1_\x1b[0;0;50;1;0;1_\x1b[0;0;99;1;0;1_",
+                vec![InputEvent::Win32InputMode, InputEvent::DeviceAttributes],
+            ),
+            (
+                "win32 key mixed with a plain key in one chunk",
+                b"\x1b[65;30;97;1;0;1_b",
+                vec![
+                    InputEvent::Win32InputMode,
+                    key(KeyEvent::plain(Key::Char('a'))),
+                    key(KeyEvent::plain(Key::Char('b'))),
+                ],
+            ),
+        ];
+
+        for (name, input, expected) in cases {
+            let mut buffer = input.to_vec();
+            assert_eq!(&drain_input_events(&mut buffer), expected, "{name}");
+            assert!(buffer.is_empty(), "{name}: buffer not fully drained");
+        }
+    }
+
+    #[test]
+    fn win32_high_surrogate_waits_for_its_low_half() {
+        let mut buffer = b"\x1b[231;0;55357;1;0;1_".to_vec();
+        assert_eq!(
+            drain_input_events(&mut buffer),
+            vec![InputEvent::Win32InputMode],
+            "high half alone announces the protocol but emits no key"
+        );
+        assert_eq!(
+            buffer, b"\x1b[231;0;55357;1;0;1_",
+            "high half stays buffered until its pair arrives"
+        );
+
+        buffer.extend_from_slice(b"\x1b[231;0;56832;1;0;1_");
+        assert_eq!(
+            drain_input_events(&mut buffer),
+            vec![
+                InputEvent::Win32InputMode,
+                InputEvent::Key(KeyEvent::plain(Key::Char('\u{1f600}'))),
+            ]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn win32_repeat_count_is_capped_against_damaged_sequences() {
+        let mut buffer = b"\x1b[65;30;97;1;0;65535_".to_vec();
+        let events = drain_input_events(&mut buffer);
+        // 1 protocol announcement + at most the documented cap of keystrokes.
+        assert_eq!(events.len(), 1 + 64);
+    }
+
+    #[test]
+    fn win32_injected_bytes_inside_paste_envelope_stay_literal() {
+        // A paste that happens to contain a win32-looking sequence must not
+        // be rewritten by the unwrap pre-pass.
+        let mut buffer = b"\x1b[200~\x1b[0;0;65;1;0;1_\x1b[201~".to_vec();
+        assert_eq!(
+            drain_input_events(&mut buffer),
+            vec![InputEvent::Paste("\x1b[0;0;65;1;0;1_".to_string())],
+            "paste content is literal even when it looks like win32 input"
         );
         assert!(buffer.is_empty());
     }

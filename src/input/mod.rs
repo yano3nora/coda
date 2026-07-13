@@ -10,6 +10,7 @@ mod key_event;
 mod mouse;
 pub mod quirks;
 pub(crate) mod raw_terminal;
+pub(crate) mod tty;
 
 use std::io::{self, Read, Write};
 
@@ -23,7 +24,7 @@ pub use decoder::{
 pub use key_event::{Key, KeyEvent, Modifiers};
 pub use mouse::{MouseButton, MouseEvent, MouseEventKind};
 pub use raw_terminal::RawModeGuard;
-pub(crate) use raw_terminal::poll_readable;
+pub(crate) use raw_terminal::poll_stdin_readable;
 
 const EXIT_CTRL_C: u8 = 0x03;
 const EXIT_CTRL_D: u8 = 0x04;
@@ -84,8 +85,18 @@ pub struct KeyboardProtocolGuard;
 impl KeyboardProtocolGuard {
     /// `CSI > 1 u`: push "disambiguate escape codes" onto the terminal's
     /// keyboard mode stack, then `CSI ? u`: query the resulting flags.
+    ///
+    /// Windows builds additionally request win32-input-mode (`CSI ?9001h`,
+    /// TASK-260713): Windows Terminal does not speak kitty CSI u, and this
+    /// is its equivalent full-fidelity key protocol. Terminals that do not
+    /// know the mode ignore the request (progressive enhancement, ADR-0003).
     pub fn push(stdout: &mut impl Write) -> io::Result<Self> {
         stdout.write_all(b"\x1b[>1u\x1b[?u")?;
+        #[cfg(windows)]
+        {
+            stdout.write_all(b"\x1b[?9001h")?;
+            raw_terminal::set_win32_input_active(true);
+        }
         stdout.flush()?;
         raw_terminal::set_keyboard_protocol_pushed(true);
         Ok(Self)
@@ -96,6 +107,11 @@ impl Drop for KeyboardProtocolGuard {
     fn drop(&mut self) {
         // `CSI < u`: pop our pushed mode so the shell keeps normal input.
         let mut stdout = io::stdout().lock();
+        #[cfg(windows)]
+        {
+            let _ = stdout.write_all(b"\x1b[?9001l");
+            raw_terminal::set_win32_input_active(false);
+        }
         let _ = stdout.write_all(b"\x1b[<u");
         let _ = stdout.flush();
         raw_terminal::set_keyboard_protocol_pushed(false);
@@ -179,7 +195,8 @@ fn format_inspect_chunk(chunk: &[u8]) -> Vec<String> {
                 InputEvent::Paste(_)
                 | InputEvent::CapabilityReply(_)
                 | InputEvent::DeviceAttributes
-                | InputEvent::Mouse(_) => None,
+                | InputEvent::Mouse(_)
+                | InputEvent::Win32InputMode => None,
             })
             .collect::<Vec<_>>();
         if !pressed.is_empty() || events.is_empty() {
@@ -211,6 +228,10 @@ fn format_protocol_line(event: &InputEvent) -> Option<String> {
         )),
         InputEvent::DeviceAttributes => Some(
             "Protocol:  primary device attributes received (no kitty CSI u reply — legacy terminal)"
+                .to_string(),
+        ),
+        InputEvent::Win32InputMode => Some(
+            "Protocol:  win32-input-mode sequences received (Windows Terminal fidelity active)"
                 .to_string(),
         ),
         // Mouse reporting is not enabled by `inspect-key`, but a stray
