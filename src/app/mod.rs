@@ -27,12 +27,14 @@ use import_cli::ImportOptions;
 /// rather than erroring (TASK-260711-19) — the `[path...]` bracket reflects
 /// that it is optional.
 const USAGE: &str = "\
-usage: coda [path...]
+usage: coda [+N] [path...]
        coda inspect-key
        coda keymap import vscode <path> [--dry-run] [--print-report] [--cmd=keep|ctrl|both]
        coda keymap verify
 
-With no path, coda opens a single empty unnamed buffer.";
+With no path, coda opens a single empty unnamed buffer.
++N jumps to line N of the first file (vim-compatible; works as lazygit's
+editAtLine target). Arguments after `--` are always treated as paths.";
 
 /// Runs the CLI entrypoint and returns a process exit code.
 pub fn run() -> i32 {
@@ -69,14 +71,14 @@ pub fn run() -> i32 {
                 1
             }
         },
-        Command::OpenFiles(paths) => run_editor(paths),
+        Command::OpenFiles { paths, line } => run_editor(paths, line),
     }
 }
 
 /// Opens the editor. Empty `paths` is not an error: it opens a single
 /// unnamed buffer (TASK-260711-19), the same buffer `buffer.new` creates —
 /// its Save writes to disk only once the user picks a location.
-fn run_editor(paths: Vec<PathBuf>) -> i32 {
+fn run_editor(paths: Vec<PathBuf>, line: Option<usize>) -> i32 {
     let mut warnings = Vec::new();
     let loaded_config = config::load();
     warnings.extend(loaded_config.warnings);
@@ -97,6 +99,9 @@ fn run_editor(paths: Vec<PathBuf>) -> i32 {
             loop_.disable_chords(&loaded_config.disabled_chords);
             if let Some(palette_key) = loaded_config.palette_key {
                 loop_.set_palette_key(palette_key);
+            }
+            if let Some(line) = line {
+                loop_.set_initial_line(line);
             }
             match loop_.run() {
                 Ok(()) => 0,
@@ -121,7 +126,12 @@ enum Command {
     InspectKey,
     KeymapVerify,
     KeymapImportVscode(ImportOptions),
-    OpenFiles(Vec<PathBuf>),
+    OpenFiles {
+        paths: Vec<PathBuf>,
+        /// 1-based line for the vim-compatible `+N` argument (TASK-260729);
+        /// applied to the first file by `run_editor`.
+        line: Option<usize>,
+    },
 }
 
 impl Command {
@@ -140,8 +150,49 @@ impl Command {
             return command;
         }
 
-        Self::OpenFiles(args.into_iter().map(PathBuf::from).collect())
+        parse_open_args(args)
     }
+}
+
+/// Parses the default "open files" form: `coda [+N] [path...] [-- path...]`.
+/// `+N` may appear anywhere before `--` (vim accepts both orders, and
+/// lazygit's default editAtLine template emits `+{{line}} -- {{filename}}`).
+/// Everything after `--` is a path, so files whose names start with `+` stay
+/// openable. Bad `+` arguments are rejected loudly rather than reinterpreted
+/// as file names — silently opening a file named `+1O` when the caller meant
+/// a line jump would violate the "no silent breakage" rule.
+fn parse_open_args(args: Vec<OsString>) -> Command {
+    let mut paths = Vec::new();
+    let mut line = None;
+    let mut rest_are_paths = false;
+    for arg in args {
+        if !rest_are_paths {
+            if arg == "--" {
+                rest_are_paths = true;
+                continue;
+            }
+            // Non-UTF-8 arguments can only be paths; `+N` is always ASCII.
+            if let Some(raw) = arg.to_str().and_then(|text| text.strip_prefix('+')) {
+                if line.is_some() {
+                    return Command::InvalidUsage(
+                        "multiple +N arguments; pass a single line number".to_string(),
+                    );
+                }
+                match raw.parse::<usize>() {
+                    Ok(parsed) if parsed > 0 => line = Some(parsed),
+                    _ => {
+                        return Command::InvalidUsage(format!(
+                            "invalid line number in +{raw} (expected +N with N >= 1; \
+                             use `--` before file names starting with '+')"
+                        ));
+                    }
+                }
+                continue;
+            }
+        }
+        paths.push(PathBuf::from(arg));
+    }
+    Command::OpenFiles { paths, line }
 }
 
 fn parse_keymap_import_vscode(args: &[OsString]) -> Option<Command> {
@@ -229,7 +280,13 @@ mod tests {
     /// in `event_loop.rs`'s own tests.
     #[test]
     fn parse_no_args_as_open_without_paths() {
-        assert_eq!(Command::parse([]), Command::OpenFiles(vec![]));
+        assert_eq!(
+            Command::parse([]),
+            Command::OpenFiles {
+                paths: vec![],
+                line: None,
+            }
+        );
     }
 
     /// TASK-260711-19: `--help`/`-h` must not be swallowed as a literal
@@ -255,8 +312,64 @@ mod tests {
     fn parse_paths_as_editor_open() {
         assert_eq!(
             Command::parse([OsString::from("a.txt"), OsString::from("b.txt")]),
-            Command::OpenFiles(vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")])
+            Command::OpenFiles {
+                paths: vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+                line: None,
+            }
         );
+    }
+
+    /// TASK-260729: vim-compatible `+N` line jump, table-driven over argument
+    /// order and the `--` separator. `+N` before or after the path must both
+    /// work (vim accepts either), while anything after `--` is a literal path
+    /// — that keeps files named like `+10` reachable and matches lazygit's
+    /// default `+{{line}} -- {{filename}}` editAtLine template.
+    #[test]
+    fn parse_plus_line_argument_table_driven() {
+        let cases: &[(&[&str], &[&str], Option<usize>)] = &[
+            (&["+10", "a.txt"], &["a.txt"], Some(10)),
+            (&["a.txt", "+10"], &["a.txt"], Some(10)),
+            (&["+10"], &[], Some(10)),
+            (&["+5", "--", "+10"], &["+10"], Some(5)),
+            (&["--", "+10"], &["+10"], None),
+            (&["--"], &[], None),
+        ];
+
+        for (args, expected_paths, expected_line) in cases {
+            assert_eq!(
+                Command::parse(args.iter().map(OsString::from)),
+                Command::OpenFiles {
+                    paths: expected_paths.iter().map(PathBuf::from).collect(),
+                    line: *expected_line,
+                },
+                "{args:?}"
+            );
+        }
+    }
+
+    /// A malformed `+` argument must fail loudly instead of being opened as
+    /// a file by that name: the caller (a script, lazygit template, muscle
+    /// memory) meant a line jump, and silently editing a new file called
+    /// `+abc` is exactly the kind of quiet breakage coda promises to avoid.
+    /// Duplicate `+N` is ambiguous, so it is rejected rather than picking one.
+    #[test]
+    fn parse_plus_line_rejects_malformed_and_duplicate() {
+        let cases: &[&[&str]] = &[
+            &["+0", "a.txt"],
+            &["+abc", "a.txt"],
+            &["+", "a.txt"],
+            &["+1", "+2", "a.txt"],
+        ];
+
+        for args in cases {
+            assert!(
+                matches!(
+                    Command::parse(args.iter().map(OsString::from)),
+                    Command::InvalidUsage(_)
+                ),
+                "{args:?}"
+            );
+        }
     }
 
     /// ADR-0007 §2(c): `keymap verify` parses as its own subcommand and

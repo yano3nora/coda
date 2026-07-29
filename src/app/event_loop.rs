@@ -290,6 +290,40 @@ impl EventLoop {
         self.wrap = wrap;
     }
 
+    /// CLI `+N` startup jump (TASK-260729): applies to the first (= active)
+    /// document, vim-style. The out-of-range notice goes to the *front* of
+    /// `message` — the status bar shows one line and truncates at the right
+    /// edge, and the notice answers the user's explicit `+N` request, so it
+    /// must not be pushed out of view by config warnings (same reasoning as
+    /// the Ghostty intercept summary above). The warnings stay queued after
+    /// it rather than being replaced.
+    pub(crate) fn set_initial_line(&mut self, line: usize) {
+        let target = self.jump_to_line(line);
+        if target < line {
+            let notice = format!("line {line} out of range; moved to {target}");
+            if self.message.is_empty() {
+                self.message = notice;
+            } else {
+                self.message = format!("{notice}; {}", self.message);
+            }
+        }
+    }
+
+    /// Moves the cursor of the active document to 1-based `line`, clamping
+    /// past-EOF targets to the last line — neither CLI `+N` nor the Go to
+    /// Line prompt may fail out of the editor over a bad line number. `0`
+    /// also clamps (to line 1) instead of underflowing, even though both
+    /// current callers reject it up front. Returns the 1-based line actually
+    /// reached so callers can report the clamp in their own wording.
+    fn jump_to_line(&mut self, line: usize) -> usize {
+        let last = self.editor().buffer.line_count().max(1);
+        let target = line.clamp(1, last);
+        self.editor_mut()
+            .set_cursor_position(Position::new(target - 1, 0));
+        self.follow_cursor = true;
+        target
+    }
+
     /// Applies `[keymap] sequence_timeout_ms` from config.toml (SPEC-0005).
     pub(crate) fn set_sequence_timeout(&mut self, timeout: Duration) {
         self.sequence_timeout = timeout;
@@ -1255,14 +1289,10 @@ impl EventLoop {
             PromptPurpose::GoToLine => {
                 match input.parse::<usize>() {
                     Ok(line) if line > 0 => {
-                        let last = self.editor().buffer.line_count().max(1);
-                        let target = line.min(last);
-                        self.editor_mut()
-                            .set_cursor_position(Position::new(target - 1, 0));
+                        let target = self.jump_to_line(line);
                         self.prompt.close();
-                        self.follow_cursor = true;
-                        self.message = if line > last {
-                            format!("line {line} out of range; moved to {last}")
+                        self.message = if target < line {
+                            format!("line {line} out of range; moved to {target}")
                         } else {
                             format!("line {line}")
                         };
@@ -1659,6 +1689,7 @@ mod tests {
     use crate::{
         app::default_bindings::{Platform, bindings_for},
         app::file::LARGE_FILE_BYTES,
+        core::position::Position,
         highlight::ThemeChoice,
         input::{
             CapabilityDetection, CapabilityProbe, InputEvent, Key, KeyEvent,
@@ -1899,6 +1930,72 @@ mod tests {
         assert_eq!(event_loop.documents[0].path, None);
         assert_eq!(event_loop.active_document().display_name(), "[No Name]");
         assert!(!event_loop.active_document().is_modified());
+    }
+
+    /// TASK-260729: CLI `+N` startup jump. In-range targets move the cursor
+    /// to the 1-based line's start; past-EOF targets clamp to the last line
+    /// and surface a notice *prepended before* the queued warnings — the
+    /// status bar truncates at the right edge, and the notice answers the
+    /// user's explicit `+N` request, so it must be the first thing visible
+    /// while the warnings still survive in the message.
+    #[test]
+    fn set_initial_line_jumps_and_clamps_with_notice() {
+        let path = temp_path("initial-line");
+        std::fs::write(&path, b"one\ntwo\nthree\nfour").unwrap();
+
+        let mut event_loop = EventLoop::open(
+            path.clone(),
+            vec!["config warning".to_string()],
+            Vec::new(),
+            ThemeChoice::Dark,
+        )
+        .unwrap();
+        // Exact message equality would be brittle: when the test itself runs
+        // inside Ghostty, `open` may add an intercept warning of its own.
+        event_loop.set_initial_line(3);
+        assert_eq!(event_loop.editor().cursor, Position::new(2, 0));
+        assert!(event_loop.message.contains("config warning"));
+        assert!(!event_loop.message.contains("out of range"));
+
+        event_loop.set_initial_line(99);
+        let last = event_loop.editor().buffer.line_count();
+        assert_eq!(event_loop.editor().cursor, Position::new(last - 1, 0));
+        assert!(event_loop.message.contains("config warning"));
+        assert!(
+            event_loop
+                .message
+                .starts_with(&format!("line 99 out of range; moved to {last}; ")),
+            "{}",
+            event_loop.message
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// TASK-260729: with several files open, `+N` must move the cursor of
+    /// the first (= active) document only — vim semantics, and what a
+    /// lazygit `editAtLine` caller expects for the single file it passed.
+    #[test]
+    fn set_initial_line_applies_to_first_document_only() {
+        let first = temp_path("initial-line-first");
+        let second = temp_path("initial-line-second");
+        std::fs::write(&first, b"a\nb\nc").unwrap();
+        std::fs::write(&second, b"x\ny\nz").unwrap();
+
+        let mut event_loop = EventLoop::open_many(
+            vec![first.clone(), second.clone()],
+            Vec::new(),
+            Vec::new(),
+            ThemeChoice::Dark,
+        )
+        .unwrap();
+        event_loop.set_initial_line(2);
+
+        assert_eq!(event_loop.documents[0].editor.cursor, Position::new(1, 0));
+        assert_eq!(event_loop.documents[1].editor.cursor, Position::new(0, 0));
+
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
     }
 
     #[test]
