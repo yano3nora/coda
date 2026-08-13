@@ -321,11 +321,15 @@ const MACOS_MENU_RESERVED: [(Key, Modifiers); 3] = [
 ///    (`unbind`/`ignore` both fail to reach the pty for these).
 /// 2. Otherwise a clipboard-copy action → `performable:copy_to_clipboard`,
 ///    which only fires while the terminal has a selection.
-/// 3. Otherwise a non-portable trigger (`quit`, or the `super+q` /
+/// 3. Otherwise a clipboard-paste action → no suggestion; the terminal's
+///    paste is the sanctioned delivery path (ADR-0008: it arrives as a
+///    bracketed paste of the OS clipboard). Suggesting `unbind` would trade
+///    that for internal-clipboard-only paste — never an improvement.
+/// 4. Otherwise a non-portable trigger (`quit`, or the `super+q` /
 ///    `super+tab` chords themselves regardless of their bound action) → no
 ///    suggestion; these are already classified as OS/terminal-reserved on
 ///    import.
-/// 4. Otherwise (any other `Consumed` or `Translated` quirk) → `unbind`.
+/// 5. Otherwise (any other `Consumed` or `Translated` quirk) → `unbind`.
 ///
 /// Pure string logic only: no terminal or resolver access, so `input/`'s
 /// dependency boundary (ADR-0004) stays intact.
@@ -356,6 +360,9 @@ pub fn suggest_ghostty_fix(quirk: &TerminalQuirk) -> Option<Suggestion> {
                      coda otherwise. {VERIFY_AGAIN_REMINDER}"
                 ),
             });
+        }
+        if action == "paste_from_clipboard" || action.starts_with("paste_from_clipboard:") {
+            return None;
         }
         if action == "quit" {
             return None;
@@ -710,6 +717,17 @@ keybind = hyper+left=text:\\x01
                     source_line: "super+c=copy_to_clipboard:mixed".to_string(),
                 },
                 Some("keybind = super+c=performable:copy_to_clipboard"),
+            ),
+            (
+                "clipboard paste action -> no suggestion (sanctioned delegation)",
+                TerminalQuirk {
+                    trigger: KeyEvent::new(Key::Char('v'), Modifiers::super_key()),
+                    effect: QuirkEffect::Consumed {
+                        action: "paste_from_clipboard".to_string(),
+                    },
+                    source_line: "super+v=paste_from_clipboard".to_string(),
+                },
+                None,
             ),
             (
                 "quit action -> no suggestion (non-portable)",

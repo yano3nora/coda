@@ -34,6 +34,9 @@ pub fn action_for_vscode_command(command: &str) -> Option<EditorAction> {
         "editor.action.moveLinesUpAction" => EditorAction::EditMoveLinesUp,
         "editor.action.moveLinesDownAction" => EditorAction::EditMoveLinesDown,
         "editor.action.selectAll" => EditorAction::SelectionAll,
+        "editor.action.clipboardCopyAction" => EditorAction::EditCopy,
+        "editor.action.clipboardCutAction" => EditorAction::EditCut,
+        "editor.action.clipboardPasteAction" => EditorAction::EditPaste,
         "undo" => EditorAction::EditUndo,
         "redo" => EditorAction::EditRedo,
         // Search
@@ -69,6 +72,20 @@ mod tests {
             action_for_vscode_command("editor.action.selectAll"),
             Some(EditorAction::SelectionAll)
         );
+        for (command, action) in [
+            ("editor.action.clipboardCopyAction", EditorAction::EditCopy),
+            ("editor.action.clipboardCutAction", EditorAction::EditCut),
+            (
+                "editor.action.clipboardPasteAction",
+                EditorAction::EditPaste,
+            ),
+        ] {
+            assert_eq!(
+                action_for_vscode_command(command),
+                Some(action),
+                "{command}"
+            );
+        }
         assert_eq!(action_for_vscode_command("editor.action.rename"), None);
     }
 }

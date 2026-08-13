@@ -19,6 +19,8 @@ coda negotiates the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/ke
 | Bound by Ghostty, **no** macOS menu reservation (`Cmd+Z`, `Cmd+↑`, …) | `keybind = <trigger>=unbind` | Once unbound the key falls through and Ghostty encodes it via the kitty protocol ([ghostty#9868](https://github.com/ghostty-org/ghostty/discussions/9868)). |
 | Reserved by a macOS menu item (`Cmd+H` Hide, `Cmd+M` Minimize) | `keybind = <trigger>=text:<kitty bytes>` | `unbind` lets the OS menu take the key back, and `ignore` consumes it in the AppKit layer even with the `unconsumed:` prefix ([ghostty#7339](https://github.com/ghostty-org/ghostty/discussions/7339), [#8181](https://github.com/ghostty-org/ghostty/discussions/8181)). Sending the kitty-protocol encoding yourself is the only reliable path. |
 | Copy (`Cmd+C`) | `keybind = super+c=performable:copy_to_clipboard` | Fires only while the terminal has a selection; otherwise passes through to coda. |
+| Cut (`Cmd+X`) | nothing | Ghostty binds nothing to `super+x` and macOS reserves no menu item for it, so it reaches coda (`edit.cut`) with zero config. |
+| Paste (`Cmd+V`) | nothing | Ghostty's default `super+v=paste_from_clipboard` delivers the OS clipboard as a bracketed paste, which coda accepts. Unbinding it makes `Cmd+V` reach coda's `edit.paste` instead — but that pastes the *internal* clipboard only (coda cannot read the OS clipboard, ADR-0008), so keep the default. |
 | `Cmd+Q`, `Cmd+Tab` | give up | Reserved by Ghostty/macOS at a level you cannot reclaim. coda classifies these as non-portable on import. |
 
 ## Example config

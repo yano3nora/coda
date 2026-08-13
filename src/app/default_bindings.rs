@@ -335,7 +335,23 @@ const COMMON: &[RawBinding] = &[
         Source::Default,
     ),
     (
+        "cmd+x",
+        EditorAction::EditCut,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    (
         "ctrl+v",
+        EditorAction::EditPaste,
+        Some("textInputFocus"),
+        Source::Default,
+    ),
+    // Ghostty binds `super+v=paste_from_clipboard` by default, so there this
+    // chord is consumed by the terminal and paste arrives as bracketed paste
+    // instead. The binding matters once `super+v` is unbound (internal
+    // clipboard paste, ADR-0008).
+    (
+        "cmd+v",
         EditorAction::EditPaste,
         Some("textInputFocus"),
         Source::Default,
@@ -576,7 +592,6 @@ mod tests {
 
     #[test]
     fn clipboard_default_bindings_parse_and_resolve() {
-        let resolver = Resolver::new(bindings());
         let context = EditorContext {
             text_input_focus: true,
             ..EditorContext::default()
@@ -585,14 +600,22 @@ mod tests {
             ("ctrl+c", EditorAction::EditCopy),
             ("ctrl+x", EditorAction::EditCut),
             ("ctrl+v", EditorAction::EditPaste),
+            ("cmd+c", EditorAction::EditCopy),
+            ("cmd+x", EditorAction::EditCut),
+            ("cmd+v", EditorAction::EditPaste),
         ];
 
-        for (key, action) in cases {
-            assert_eq!(
-                resolver.resolve(&[key.parse().unwrap()], &context),
-                ResolveResult::Matched(action),
-                "{key}"
-            );
+        // Clipboard chords live in COMMON, so they must resolve on every
+        // platform table, not just the compile-target one.
+        for platform in [Platform::MacOs, Platform::Other] {
+            let resolver = Resolver::new(bindings_for(platform));
+            for (key, action) in cases {
+                assert_eq!(
+                    resolver.resolve(&[key.parse().unwrap()], &context),
+                    ResolveResult::Matched(action),
+                    "{key} on {platform:?}"
+                );
+            }
         }
     }
 

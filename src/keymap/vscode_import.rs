@@ -654,6 +654,35 @@ mod tests {
     }
 
     #[test]
+    fn imports_clipboard_commands_as_imported_bindings() {
+        let fixture = r#"[
+            { "key": "cmd+c", "command": "editor.action.clipboardCopyAction" },
+            { "key": "cmd+x", "command": "editor.action.clipboardCutAction" },
+            { "key": "cmd+v", "command": "editor.action.clipboardPasteAction" }
+        ]"#;
+
+        let imported =
+            import_vscode_keybindings(fixture, &KeyboardCapabilities::modern(), CmdStrategy::Keep)
+                .unwrap();
+
+        assert_eq!(imported.report.summary().imported, 3);
+        for (key, action) in [
+            ("cmd+c", EditorAction::EditCopy),
+            ("cmd+x", EditorAction::EditCut),
+            ("cmd+v", EditorAction::EditPaste),
+        ] {
+            assert!(
+                imported
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.action == action
+                        && format_key_for_config(&binding.keys) == key),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
     fn empty_command_is_classified_as_ignored_unbind_not_unsupported() {
         let fixture = r#"[
             { "key": "cmd+shift+i", "command": "" },

@@ -22,6 +22,7 @@ ADR-0007 の実測で、Ghostty は `super+c/v/z/a` を default で消費する�
 | undo / redo(`Cmd+Z`) | **editor 内部のみ** | terminal の undo は tab/split 操作の取り消しであり、buffer 編集と無関係 |
 
 - editor 内部操作(select all / undo / copy)には配達可能なキーが必要。super が消費される環境では import report で代替(`--cmd=ctrl` 部分変換、または terminal 側の keybind 解除)を案内する(ADR-0007)
+- paste の委譲は「terminal が `Cmd+V` を消費する」前提であり、これを正常系とする(quirk 警告や `unbind` 提案の対象にしない)。terminal 側で `super+v` が unbind され chord が coda まで届いた場合に限り、default binding `cmd+v` = `edit.paste` が **内部 clipboard からの paste** として fallback する(OS clipboard の読出は行わない。TASK-260813)
 
 ### 2. Clipboard 実装
 

@@ -82,6 +82,9 @@ VS Code の `keybindings.json`(JSONC)を読み込む。
 | `editor.action.moveLinesUpAction`   | `edit.moveLinesUp`      |
 | `editor.action.moveLinesDownAction` | `edit.moveLinesDown`    |
 | `editor.action.selectAll`           | `selection.all`         |
+| `editor.action.clipboardCopyAction` | `edit.copy`             |
+| `editor.action.clipboardCutAction`  | `edit.cut`              |
+| `editor.action.clipboardPasteAction`| `edit.paste`            |
 | `undo`                              | `edit.undo`             |
 | `redo`                              | `edit.redo`             |
 

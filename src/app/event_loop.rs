@@ -1590,7 +1590,16 @@ fn ghostty_intercept_warning(quirks: &[TerminalQuirk], resolver: &Resolver) -> O
         };
 
         let warn = match &quirk.effect {
-            QuirkEffect::Consumed { .. } => true,
+            // Ghostty's `paste_from_clipboard` is the sanctioned delivery
+            // path for paste (ADR-0008): the chord arrives as a bracketed
+            // paste of the OS clipboard, which coda accepts — strictly
+            // better than the internal-clipboard `edit.paste` binding it
+            // shadows, so it is not an interception worth warning about.
+            QuirkEffect::Consumed { action } => {
+                let is_paste_delegation =
+                    action == "paste_from_clipboard" || action.starts_with("paste_from_clipboard:");
+                !(is_paste_delegation && trigger_action == EditorAction::EditPaste)
+            }
             QuirkEffect::Translated { events, .. } => {
                 events.is_empty()
                     || resolved_action(resolver, events, &context) != Some(trigger_action)
@@ -2307,6 +2316,7 @@ keybind = super+arrow_left=text:\\\\x01
 keybind = alt+arrow_left=esc:b
 keybind = alt+arrow_right=esc:f
 keybind = super+c=copy_to_clipboard:mixed
+keybind = super+v=paste_from_clipboard
 keybind = super+a=select_all
 keybind = super+f=start_search
 keybind = shift+arrow_left=adjust_selection:left
@@ -2335,6 +2345,13 @@ keybind = super+digit_1=goto_tab:1
         // must be flagged.
         assert!(warning.contains('F'), "cmd+f must be flagged: {warning}");
         assert!(warning.contains('A'), "cmd+a must be flagged: {warning}");
+        // cmd+v is bound to edit.paste, but Ghostty's paste_from_clipboard
+        // delivers the same operation as a bracketed paste (ADR-0008) —
+        // the sanctioned delegation must not be reported as interception.
+        assert!(
+            !warning.contains("Cmd+V"),
+            "cmd+v paste delegation must be suppressed: {warning}"
+        );
     }
 
     #[test]
