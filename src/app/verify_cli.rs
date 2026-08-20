@@ -250,9 +250,10 @@ pub(crate) fn run_keymap_verify() -> i32 {
     };
 
     // Cheap and already guarded by TERM_PROGRAM=ghostty (input/quirks.rs
-    // module docs); calling it once here is fine even outside Ghostty, where
-    // it just yields an empty Vec.
-    let quirks = quirks::detect();
+    // module docs); calling it once here is fine even outside Ghostty. A
+    // failed query (`None`) degrades to "no quirk annotations" — verify's
+    // own measurements are the primary signal here.
+    let quirks = quirks::detect().unwrap_or_default();
     let lines = session.summary_lines(&quirks);
     println!();
     for line in &lines {

@@ -15,6 +15,12 @@
 - 完了 (260713) → [TASK-260713 mouse / palette / go to line](TASK-260713-mouse-palette-goto-line.md)
 - 完了 (260713) → [TASK-260713 P2 key delivery completion](TASK-260713-p2-key-delivery.md)
 
+## P2: v0.2 候補 (追加)
+
+- [ ] palette / which-key で「この terminal では届かない binding」を dim + 注記する
+  (260820 environment info panel の段階 2。届かないと知るべき瞬間は palette で
+  binding を見た瞬間。データ源は quirks 検出 + keymap verify の実測結果)
+
 ## Deferred: 着手前に再判断
 
 - [ ] 他 editor profile import（Zed / Sublime / JetBrains / Helix）

@@ -57,20 +57,26 @@ pub struct TerminalQuirk {
 /// Detects Ghostty keybind quirks for the current process environment.
 ///
 /// Only runs `ghostty +list-keybinds` when `TERM_PROGRAM` says we are inside
-/// Ghostty. Any failure along the way (binary missing, non-zero exit,
-/// non-UTF-8 stdout) silently yields an empty `Vec` — this must never block
-/// or delay startup.
-pub fn detect() -> Vec<TerminalQuirk> {
-    let is_ghostty = std::env::var("TERM_PROGRAM")
-        .map(|value| value.eq_ignore_ascii_case("ghostty"))
-        .unwrap_or(false);
-    if !is_ghostty {
-        return Vec::new();
+/// Ghostty. Returns `None` when the query itself failed (binary missing,
+/// non-zero exit, non-UTF-8 stdout) or we are not inside Ghostty — callers
+/// must not confuse "query failed" with "queried, nothing intercepted"
+/// (`Some(vec![])`), or they would report a clean environment they never
+/// actually saw. Failures never block or delay startup.
+pub fn detect() -> Option<Vec<TerminalQuirk>> {
+    if !is_ghostty() {
+        return None;
     }
 
-    run_list_keybinds()
-        .map(|output| parse_ghostty_keybinds(&output))
-        .unwrap_or_default()
+    run_list_keybinds().map(|output| parse_ghostty_keybinds(&output))
+}
+
+/// Whether the current process runs inside Ghostty — the only terminal whose
+/// keybind table can be queried (`+list-keybinds`). Callers use this to tell
+/// "no conflicts detected" apart from "detection impossible here".
+pub fn is_ghostty() -> bool {
+    std::env::var("TERM_PROGRAM")
+        .map(|value| value.eq_ignore_ascii_case("ghostty"))
+        .unwrap_or(false)
 }
 
 /// Runs `ghostty +list-keybinds` and returns its stdout, or `None` on any

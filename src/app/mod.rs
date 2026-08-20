@@ -8,12 +8,12 @@ mod editor_view;
 mod event_loop;
 mod file;
 mod import_cli;
+mod info;
 mod inspector;
 mod palette;
 mod prompt_overlay;
 mod search_overlay;
 mod verify_cli;
-mod warnings;
 mod which_key;
 
 use std::{env, ffi::OsString, path::PathBuf};
@@ -89,9 +89,6 @@ fn run_editor(paths: Vec<PathBuf>, line: Option<usize>) -> i32 {
         loaded_config.theme,
     ) {
         Ok(mut loop_) => {
-            // Config-breakage warnings get the blocking panel; file notices
-            // and environment warnings stay in the status bar (TASK-260820).
-            loop_.set_config_warnings(loaded_config.warnings);
             loop_.set_wrap(loaded_config.wrap);
             loop_.set_sequence_timeout(std::time::Duration::from_millis(
                 loaded_config.sequence_timeout_ms,
@@ -102,6 +99,23 @@ fn run_editor(paths: Vec<PathBuf>, line: Option<usize>) -> i32 {
             if let Some(palette_key) = loaded_config.palette_key {
                 loop_.set_palette_key(palette_key);
             }
+            // Config-breakage warnings and the environment report go to the
+            // startup info panel; the status bar keeps only the palette hint
+            // and short per-file notices (TASK-260820-environment-info-panel).
+            // Runs after the binding mutations above so the interception
+            // report reflects the live binding set.
+            let mut config_warnings = loaded_config.warnings;
+            let ack_path = config::environment_ack_path();
+            let acknowledged = ack_path
+                .as_deref()
+                .map(|path| config::load_environment_ack(path, &mut config_warnings))
+                .unwrap_or_default();
+            loop_.set_startup_info(
+                config_warnings,
+                &acknowledged,
+                ack_path,
+                input::quirks::is_ghostty(),
+            );
             if let Some(line) = line {
                 loop_.set_initial_line(line);
             }

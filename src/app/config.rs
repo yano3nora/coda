@@ -301,6 +301,89 @@ pub(crate) fn settings_path() -> Option<PathBuf> {
     config_base_dir().map(|dir| dir.join("config.toml"))
 }
 
+/// Absolute path to the acknowledged-environment state file, or `None` when
+/// `HOME`/`XDG_CONFIG_HOME` cannot be resolved.
+pub(crate) fn environment_ack_path() -> Option<PathBuf> {
+    config_base_dir().map(|dir| dir.join("environment-info.json"))
+}
+
+/// Terminal identity key for the acknowledgement map: matching bindings must
+/// be re-acknowledged per terminal program *and* version, the same rule
+/// `keymap verify` applies to measured chords (a Ghostty update can change
+/// its keybind table).
+pub(crate) fn terminal_identity() -> String {
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
+    let version = std::env::var("TERM_PROGRAM_VERSION").unwrap_or_else(|_| "unknown".to_string());
+    format!("{program} {version}")
+}
+
+/// Acknowledgement state: environment-info lines the user has dismissed,
+/// keyed by terminal identity. The lines themselves are the comparison key —
+/// the panel reappears exactly when the facts change, with no hashing to go
+/// stale across versions.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EnvironmentAckState {
+    schema_version: u32,
+    acknowledged: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+const ENVIRONMENT_ACK_SCHEMA: u32 = 1;
+
+/// Lines previously acknowledged for the current terminal. Corrupt or
+/// unreadable state is reported and treated as "nothing acknowledged" — the
+/// panel shows again, which is the safe direction (never hide facts because
+/// a state file broke).
+pub(crate) fn load_environment_ack(path: &Path, warnings: &mut Vec<String>) -> Vec<String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            warnings.push(format!("{}: {error}; ignored ack state", path.display()));
+            return Vec::new();
+        }
+    };
+    let state: EnvironmentAckState = match serde_json::from_str(&text) {
+        Ok(state) => state,
+        Err(error) => {
+            warnings.push(format!("{}: {error}; ignored ack state", path.display()));
+            return Vec::new();
+        }
+    };
+    if state.schema_version != ENVIRONMENT_ACK_SCHEMA {
+        return Vec::new();
+    }
+    state
+        .acknowledged
+        .get(&terminal_identity())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Records `lines` as acknowledged for the current terminal, preserving other
+/// terminals' entries. A failure must never disturb the editing session, but
+/// the caller surfaces it (status bar) — a silently lost acknowledgement
+/// makes the panel's reappearance next launch inexplicable.
+pub(crate) fn save_environment_ack(path: &Path, lines: &[String]) -> std::io::Result<()> {
+    let mut state = fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<EnvironmentAckState>(&text).ok())
+        .filter(|state| state.schema_version == ENVIRONMENT_ACK_SCHEMA)
+        .unwrap_or(EnvironmentAckState {
+            schema_version: ENVIRONMENT_ACK_SCHEMA,
+            acknowledged: std::collections::BTreeMap::new(),
+        });
+    state
+        .acknowledged
+        .insert(terminal_identity(), lines.to_vec());
+    let mut body = serde_json::to_vec_pretty(&state)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    body.push(b'\n');
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, body)
+}
+
 /// Absolute path to the user `bindings.json`, or `None` when
 /// `HOME`/`XDG_CONFIG_HOME` cannot be resolved.
 pub(crate) fn keybindings_path() -> Option<PathBuf> {
@@ -465,6 +548,50 @@ mod tests {
         assert_eq!(loaded.palette_key, None);
         assert!(loaded.capability_warning);
         fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[test]
+    fn environment_ack_round_trips_and_ignores_corruption() {
+        let temp = temp_config_dir("env-ack");
+        fs::create_dir_all(&temp).unwrap();
+        let path = temp.join("environment-info.json");
+        let lines = vec!["Ghostty intercepts 2 binding(s):".to_string()];
+
+        super::save_environment_ack(&path, &lines).unwrap();
+        let mut warnings = Vec::new();
+        assert_eq!(super::load_environment_ack(&path, &mut warnings), lines);
+        assert!(warnings.is_empty(), "clean state loads silently");
+
+        // Re-acknowledging different facts replaces this terminal's entry.
+        let changed = vec!["Ghostty intercepts 5 binding(s):".to_string()];
+        super::save_environment_ack(&path, &changed).unwrap();
+        let mut warnings = Vec::new();
+        assert_eq!(super::load_environment_ack(&path, &mut warnings), changed);
+
+        // Corrupt state must warn and read as "nothing acknowledged" — the
+        // panel shows again, which is the safe direction, and startup never
+        // fails over a broken state file.
+        fs::write(&path, "not json").unwrap();
+        let mut warnings = Vec::new();
+        assert!(super::load_environment_ack(&path, &mut warnings).is_empty());
+        assert_eq!(warnings.len(), 1, "corruption is reported: {warnings:?}");
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn environment_ack_save_failure_surfaces_as_an_error() {
+        let temp = temp_config_dir("env-ack-fail");
+        fs::create_dir_all(&temp).unwrap();
+        // The would-be parent directory is a plain file: create_dir_all and
+        // the write both fail, and the caller must get to see that.
+        let blocker = temp.join("blocker");
+        fs::write(&blocker, "file").unwrap();
+        let path = blocker.join("child.json");
+
+        assert!(super::save_environment_ack(&path, &["x".to_string()]).is_err());
+
+        let _ = fs::remove_dir_all(&temp);
     }
 
     fn temp_config_dir(label: &str) -> std::path::PathBuf {

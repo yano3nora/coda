@@ -18,7 +18,7 @@ use crate::{
         KeyboardCapabilities, KeyboardProtocolGuard, Modifiers, MouseButton, MouseEvent,
         MouseEventKind, MouseReportingGuard, RawModeGuard, drain_input_events,
         flush_pending_escape, poll_stdin_readable,
-        quirks::{self, QuirkEffect, TerminalQuirk},
+        quirks::{self, QuirkEffect, TerminalQuirk, suggest_ghostty_fix},
     },
     keymap::{EditorAction, EditorContext, ResolveResult, Resolver},
     ui::{
@@ -31,11 +31,11 @@ use super::{
     document::{Document, SaveError},
     editor_view::StatusLine,
     file,
+    info::{InfoOverlay, draw_info},
     inspector::{InspectorOverlay, draw_inspector, is_close_key},
     palette::{CommandPalette, filter_actions},
     prompt_overlay::{PromptOutcome, PromptOverlay, PromptPurpose, draw_prompt_overlay},
     search_overlay::{SearchOverlay, draw_search_overlay},
-    warnings::{WarningsOverlay, draw_warnings},
     which_key::{draw_which_key, which_key_lines},
 };
 
@@ -118,8 +118,12 @@ pub struct EventLoop {
     /// `file.saveAs` (TASK-260712 Gate 1).
     prompt: PromptOverlay,
     inspector: InspectorOverlay,
-    /// Startup panel for config-breakage warnings (TASK-260820).
-    warnings: WarningsOverlay,
+    /// Startup panel for config-breakage warnings and environment facts
+    /// (TASK-260820, TASK-260820-environment-info-panel).
+    info: InfoOverlay,
+    /// Where dismissing the panel persists the environment acknowledgement;
+    /// `None` (tests, unresolved HOME) skips persistence.
+    env_ack_path: Option<std::path::PathBuf>,
     message: String,
     clipboard: String,
     pending_terminal_write: Vec<u8>,
@@ -137,6 +141,9 @@ pub struct EventLoop {
     /// decision 2(b)). Kept for the `:inspect-key` live mode (TASK-260711-17)
     /// to annotate incoming events, not just for the one-line startup warning.
     ghostty_quirks: Vec<TerminalQuirk>,
+    /// Whether `ghostty +list-keybinds` actually answered. `false` with an
+    /// empty quirk list means "we could not look", never "nothing found".
+    quirks_queried: bool,
     /// In-flight keyboard capability detection, armed by `run()` right after
     /// the protocol push. `None` once resolved (or if never armed, as in
     /// `EventLoop::open`/`open_many` used by tests without a real terminal)
@@ -213,17 +220,20 @@ impl EventLoop {
         // Query Ghostty's own keybind table before raw mode / the alt screen
         // are entered (that happens later, in `run()`): `quirks::detect()`
         // shells out to `ghostty +list-keybinds`, which requires the
-        // terminal to still be in its normal state. Any interception that
-        // would change behavior gets folded into `warnings` as a single
-        // summary line (ADR-0007 decision 2(b), TASK-260711-17).
-        let ghostty_quirks = quirks::detect();
-        if let Some(warning) = ghostty_intercept_warning(&ghostty_quirks, &resolver) {
-            // Front of the list, not the back: the status bar shows one line
-            // and config warnings can be numerous (one per broken binding),
-            // which would push this single aggregated summary out of view.
-            // Interim measure until a full warning viewer exists (backlog).
-            warnings.insert(0, warning);
-        }
+        // terminal to still be in its normal state. Interceptions that would
+        // change behavior surface in the startup info panel via
+        // `set_startup_info` (TASK-260820-environment-info-panel), not here.
+        // "Query failed" and "queried, nothing intercepted" must stay
+        // distinguishable, so the failure flag survives next to the (empty)
+        // quirk list the inspector keeps using.
+        let detected = quirks::detect();
+        let quirks_queried = detected.is_some();
+        let ghostty_quirks = detected.unwrap_or_default();
+
+        // The startup status bar carries only the rescue hint plus short
+        // per-file notices — anything longer belongs in the info panel,
+        // where it cannot truncate out of view unread.
+        warnings.insert(0, "F1: command palette".to_string());
 
         Ok(Self {
             documents,
@@ -234,7 +244,8 @@ impl EventLoop {
             search: SearchOverlay::default(),
             prompt: PromptOverlay::default(),
             inspector: InspectorOverlay::default(),
-            warnings: WarningsOverlay::default(),
+            info: InfoOverlay::default(),
+            env_ack_path: None,
             message: warnings.join("; "),
             clipboard: String::new(),
             pending_terminal_write: Vec::new(),
@@ -245,6 +256,7 @@ impl EventLoop {
             save_conflict_guard: SaveConflictGuard::default(),
             save_as_overwrite_confirm: None,
             ghostty_quirks,
+            quirks_queried,
             capability_probe: None,
             capability_detection: None,
             wrap: false,
@@ -257,12 +269,69 @@ impl EventLoop {
         })
     }
 
-    /// Routes config-breakage warnings (bindings.json / config.toml load
-    /// issues) to the blocking startup panel instead of the one-line status
-    /// bar, where they truncate out of view unread (TASK-260820). The panel
-    /// only opens when `warnings` is non-empty.
-    pub fn set_config_warnings(&mut self, warnings: Vec<String>) {
-        self.warnings.set_startup_warnings(warnings);
+    /// Fills the startup info panel: config-breakage warnings (shown until
+    /// fixed) plus the environment report (shown until acknowledged), and
+    /// where to persist that acknowledgement. Call after every binding-set
+    /// mutation (`set_ctrl_c_quits`, `disable_chords`) so the interception
+    /// report reflects the bindings that are actually live.
+    ///
+    /// `terminal_queryable` is passed in rather than read from the
+    /// environment here, so tests stay deterministic regardless of which
+    /// terminal runs them.
+    pub fn set_startup_info(
+        &mut self,
+        config_warnings: Vec<String>,
+        acknowledged_env: &[String],
+        ack_path: Option<std::path::PathBuf>,
+        terminal_queryable: bool,
+    ) {
+        let env = self.environment_info(terminal_queryable);
+        let already_acknowledged = env == acknowledged_env;
+        self.info
+            .set_startup(config_warnings, env, already_acknowledged);
+        self.env_ack_path = ack_path;
+    }
+
+    /// The environment section of the info panel: what this terminal does to
+    /// the live bindings, or the honest admission that we cannot know —
+    /// which covers both non-queryable terminals and a Ghostty whose
+    /// `+list-keybinds` query failed (never conflate that with "queried,
+    /// nothing intercepted").
+    fn environment_info(&self, terminal_queryable: bool) -> Vec<String> {
+        if terminal_queryable && self.quirks_queried {
+            return ghostty_intercept_report(&self.ghostty_quirks, &self.resolver);
+        }
+        if terminal_queryable {
+            return vec![
+                "Ghostty: `+list-keybinds` query failed — interception status unknown.".to_string(),
+                "Run `coda keymap verify` to measure what actually arrives.".to_string(),
+            ];
+        }
+        let program = std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "this terminal".to_string());
+        vec![
+            format!(
+                "{program}: keybindings cannot be queried — Cmd-key bindings may be \
+                 intercepted without coda noticing."
+            ),
+            "coda assumes a modern terminal emulator (kitty keyboard protocol). Run \
+             `coda keymap verify` to measure what actually arrives."
+                .to_string(),
+        ]
+    }
+
+    /// Closes the info panel; the first dismissal of a fresh environment
+    /// report is persisted as acknowledged so it stays silent on later
+    /// launches until the facts change. A failed save must not disturb the
+    /// session, but it must be visible — otherwise the panel's surprise
+    /// reappearance next launch has no explanation.
+    fn dismiss_info(&mut self) {
+        if let Some(lines) = self.info.dismiss()
+            && let Some(path) = &self.env_ack_path
+            && let Err(error) = config::save_environment_ack(path, &lines)
+        {
+            self.message =
+                format!("failed to save info acknowledgement ({error}); it may show again");
+        }
     }
 
     /// Rebuilds only the default Ctrl+C policy while preserving user and
@@ -538,7 +607,7 @@ impl EventLoop {
         // Inspector before palette: when both are visible, the palette (its
         // rescue entry point always wins per AGENTS.md) draws on top.
         draw_inspector(screen, &self.inspector, self.capability_detection);
-        draw_warnings(screen, &self.warnings);
+        draw_info(screen, &self.info);
         super::palette::draw_palette(screen, &self.palette, &items);
     }
 
@@ -570,7 +639,7 @@ impl EventLoop {
             || self.prompt.visible
             || self.inspector.visible
             || self
-                .warnings
+                .info
                 .blocks_input(self.screen_size.0, self.screen_size.1)
         {
             return QuitDecision::Continue;
@@ -735,10 +804,11 @@ impl EventLoop {
     }
 
     /// Records the resolved capability judgment and, for a legacy result,
-    /// prepends the startup warning to `self.message` — same "front of the
-    /// list" reasoning as `ghostty_intercept_warning` (TASK-260711-17): the
-    /// status bar shows one line, and this is a single fact the user needs
-    /// regardless of whatever else is already queued there.
+    /// prepends the startup warning to `self.message`. This stays in the
+    /// status bar (not the info panel) as a deliberate exception: the probe
+    /// resolves asynchronously ~500ms after startup, when the panel has
+    /// already been drawn or dismissed — a startup surface cannot carry it
+    /// (TASK-260820-environment-info-panel notes).
     fn resolve_capabilities(&mut self, detection: CapabilityDetection) {
         self.capability_probe = None;
         self.capability_detection = Some(detection);
@@ -773,13 +843,13 @@ impl EventLoop {
         if self.palette.visible {
             self.palette.push_text(&sanitized);
         } else if self
-            .warnings
+            .info
             .blocks_input(self.screen_size.0, self.screen_size.1)
         {
             // Same swallow rule and priority as keys: a paste aimed at the
             // editor while the panel is up must not land in the buffer (or
             // an overlay hidden underneath) unseen.
-            self.warnings.close();
+            self.dismiss_info();
         } else if self.prompt.visible {
             self.prompt.paste_text(&sanitized);
         } else if self.inspector.visible {
@@ -830,14 +900,29 @@ impl EventLoop {
         // the screen is too small to draw the panel: an invisible overlay
         // must never swallow input.
         if self
-            .warnings
+            .info
             .blocks_input(self.screen_size.0, self.screen_size.1)
         {
-            // Hit-enter convention: the dismissing key is swallowed so a
-            // keystroke aimed at the panel never edits the buffer under it.
-            // F1 stays the exception (handled above): the palette opens on
-            // top without losing the panel.
-            self.warnings.close();
+            // Arrow/page keys scroll so every line is readable before the
+            // dismissal acknowledges them; any other key follows the
+            // hit-enter convention — swallowed, so a keystroke aimed at the
+            // panel never edits the buffer under it. F1 stays the exception
+            // (handled above): the palette opens on top without losing the
+            // panel.
+            let (width, height) = self.screen_size;
+            match event.key {
+                Key::Up => self.info.scroll_by(-1, width, height),
+                Key::Down => self.info.scroll_by(1, width, height),
+                Key::PageUp => {
+                    let page = self.info.page_rows(width, height);
+                    self.info.scroll_by(-page, width, height);
+                }
+                Key::PageDown => {
+                    let page = self.info.page_rows(width, height);
+                    self.info.scroll_by(page, width, height);
+                }
+                _ => self.dismiss_info(),
+            }
             return QuitDecision::Continue;
         }
 
@@ -1144,9 +1229,9 @@ impl EventLoop {
                 self.inspector.open();
                 self.message = "inspect-key: press any key".to_string();
             }
-            EditorAction::WarningsShow => {
-                if !self.warnings.reopen() {
-                    self.message = "no config warnings".to_string();
+            EditorAction::InfoShow => {
+                if !self.info.reopen() {
+                    self.message = "no config warnings or environment info".to_string();
                 }
             }
             EditorAction::ViewToggleWrap => {
@@ -1625,7 +1710,9 @@ fn ellipsize(text: &str, width: usize) -> String {
 }
 
 /// Cross-references detected Ghostty quirks against the resolver's active
-/// bindings and summarizes the ones worth warning about into one line.
+/// bindings and reports every interception worth acting on, one line per
+/// binding with its ready-to-paste fix (TASK-260820-environment-info-panel:
+/// "this is exactly what to change for everything to work").
 ///
 /// A quirk is only worth mentioning if this program actually has a binding
 /// on the trigger chord (otherwise there is nothing to lose). For
@@ -1633,13 +1720,13 @@ fn ellipsize(text: &str, width: usize) -> String {
 /// to the *same* action as the original trigger, the terminal's rewrite is
 /// harmless (this is exactly the ADR-0011 case — `cmd+left` arrives as
 /// `ctrl+a`, and the default table binds both to `cursor.lineStart`) and the
-/// quirk is not reported.
-fn ghostty_intercept_warning(quirks: &[TerminalQuirk], resolver: &Resolver) -> Option<String> {
+/// quirk is not reported. Returns an empty list when nothing is intercepted.
+fn ghostty_intercept_report(quirks: &[TerminalQuirk], resolver: &Resolver) -> Vec<String> {
     // `EditorContext::default()` already has editor_focus/text_input_focus
     // true, which is the representative context the design calls for.
     let context = EditorContext::default();
 
-    let mut affected = Vec::new();
+    let mut entries = Vec::new();
     for quirk in quirks {
         let Some(trigger_action) =
             resolved_action(resolver, std::slice::from_ref(&quirk.trigger), &context)
@@ -1665,11 +1752,39 @@ fn ghostty_intercept_warning(quirks: &[TerminalQuirk], resolver: &Resolver) -> O
         };
 
         if warn {
-            affected.push(quirk.trigger.to_string());
+            // Fix reasons (menu-shortcut caveats etc.) stay in the
+            // inspector, which shows them per keypress; the panel is the
+            // compact "change this and it works" list.
+            entries.push(match suggest_ghostty_fix(quirk) {
+                Some(suggestion) => format!(
+                    "  {} ({}) — fix: {}",
+                    quirk.trigger,
+                    trigger_action.as_str(),
+                    suggestion.config_line
+                ),
+                None => format!(
+                    "  {} ({}) — no portable fix (OS/terminal reserved)",
+                    quirk.trigger,
+                    trigger_action.as_str()
+                ),
+            });
         }
     }
 
-    format_intercept_warning(&affected)
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "Ghostty intercepts {} binding(s) before they reach coda:",
+        entries.len()
+    )];
+    lines.extend(entries);
+    lines.push(
+        "apply fixes to the Ghostty config, restart Ghostty (reload is not enough), then \
+         re-run `coda keymap verify`."
+            .to_string(),
+    );
+    lines
 }
 
 /// Resolves a key sequence to a bound action, treating anything short of an
@@ -1684,26 +1799,6 @@ fn resolved_action(
         ResolveResult::Matched(action) => Some(action),
         _ => None,
     }
-}
-
-/// Formats the startup warning line, showing up to 3 example chords and
-/// truncating the rest with `…`. Returns `None` when nothing is affected.
-fn format_intercept_warning(affected: &[String]) -> Option<String> {
-    if affected.is_empty() {
-        return None;
-    }
-
-    let shown = affected
-        .iter()
-        .take(3)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let suffix = if affected.len() > 3 { ", …" } else { "" };
-    Some(format!(
-        "Ghostty intercepts {} bindings: {shown}{suffix} — run inspector.open for details",
-        affected.len()
-    ))
 }
 
 /// Actions that mutate the buffer or its persisted contents, blocked on a
@@ -1749,10 +1844,7 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        EventLoop, PromptPurpose, QuitDecision, QuitGuard, TabItem, draw_tab_bar,
-        format_intercept_warning, ghostty_intercept_warning,
-    };
+    use super::{EventLoop, PromptPurpose, QuitDecision, QuitGuard, TabItem, draw_tab_bar};
     use crate::{
         app::default_bindings::{Platform, bindings_for},
         app::file::LARGE_FILE_BYTES,
@@ -1959,53 +2051,104 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// `set_startup_info` for tests: `terminal_queryable = true` with the
+    /// detected quirks cleared yields an empty environment section, keeping
+    /// the outcome independent of whichever terminal runs the test suite
+    /// (`open_many` probes the real environment).
+    fn startup_info(event_loop: &mut EventLoop, config_warnings: Vec<String>) {
+        event_loop.ghostty_quirks.clear();
+        event_loop.quirks_queried = true;
+        event_loop.set_startup_info(config_warnings, &[], None, true);
+    }
+
     #[test]
-    fn warning_panel_swallows_the_dismissing_key_and_reopens_from_palette() {
+    fn info_panel_swallows_the_dismissing_key_and_reopens_from_palette() {
         let mut event_loop =
             EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
-        event_loop.set_config_warnings(vec!["bindings.json: trailing comma".to_string()]);
-        assert!(
-            event_loop.warnings.visible,
-            "startup warnings open the panel"
+        startup_info(
+            &mut event_loop,
+            vec!["bindings.json: trailing comma".to_string()],
         );
+        assert!(event_loop.info.visible, "startup warnings open the panel");
         let untouched = buffer_text(&event_loop);
 
         // F1 rescue stays available on top of the panel without dismissing it.
         event_loop.handle_key(KeyEvent::plain(Key::F(1)));
         assert!(event_loop.palette.visible);
-        assert!(event_loop.warnings.visible, "F1 does not dismiss the panel");
+        assert!(event_loop.info.visible, "F1 does not dismiss the panel");
         event_loop.handle_key(KeyEvent::plain(Key::Esc));
         assert!(!event_loop.palette.visible);
 
         event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
-        assert!(!event_loop.warnings.visible, "any other key dismisses");
+        assert!(!event_loop.info.visible, "any other key dismisses");
         assert_eq!(
             buffer_text(&event_loop),
             untouched,
             "the dismissing key never reaches the buffer"
         );
 
-        event_loop.dispatch(EditorAction::WarningsShow);
+        event_loop.dispatch(EditorAction::InfoShow);
+        assert!(event_loop.info.visible, "info.show reopens the panel");
+    }
+
+    /// TASK-260820-environment-info-panel: a startup with an unacknowledged
+    /// environment report opens the panel; dismissing persists the report to
+    /// the ack file, and a next launch presenting the same report as
+    /// acknowledged stays silent.
+    #[test]
+    fn dismissing_the_environment_report_acknowledges_it_on_disk() {
+        let ack_path = temp_path("env-ack");
+        let _ = std::fs::remove_file(&ack_path);
+
+        let mut event_loop =
+            EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        // Non-queryable terminal → the honest "cannot query" notice.
+        event_loop.set_startup_info(Vec::new(), &[], Some(ack_path.clone()), false);
         assert!(
-            event_loop.warnings.visible,
-            "warnings.show reopens the panel"
+            event_loop.info.visible,
+            "an unacknowledged environment report opens the panel"
         );
+
+        event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
+        assert!(!event_loop.info.visible);
+        let mut warnings = Vec::new();
+        let acknowledged = super::config::load_environment_ack(&ack_path, &mut warnings);
+        assert!(warnings.is_empty(), "ack file loads cleanly: {warnings:?}");
+        assert!(
+            acknowledged
+                .first()
+                .is_some_and(|line| line.contains("cannot be queried")),
+            "dismissal persisted the report: {acknowledged:?}"
+        );
+
+        // Same facts next launch → silent; info.show still shows them.
+        let mut next_launch =
+            EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        next_launch.set_startup_info(Vec::new(), &acknowledged, Some(ack_path.clone()), false);
+        assert!(
+            !next_launch.info.visible,
+            "the acknowledged report does not nag"
+        );
+        next_launch.dispatch(EditorAction::InfoShow);
+        assert!(next_launch.info.visible, "info.show reopens the full panel");
+
+        let _ = std::fs::remove_file(&ack_path);
     }
 
     /// TASK-260820 (codex review round 1): input priority mirrors draw order
     /// — the panel takes keys before the prompt/inspector overlays drawn
     /// beneath it — and a panel the screen cannot draw never swallows input.
     #[test]
-    fn warning_panel_takes_keys_before_lower_overlays_and_skips_tiny_screens() {
+    fn info_panel_takes_keys_before_lower_overlays_and_skips_tiny_screens() {
         let mut event_loop =
             EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
-        event_loop.set_config_warnings(vec!["bindings.json: broken".to_string()]);
+        startup_info(&mut event_loop, vec!["bindings.json: broken".to_string()]);
         event_loop.dispatch(EditorAction::GoToLine);
         assert!(event_loop.prompt.visible, "prompt opens under the panel");
 
         event_loop.handle_key(KeyEvent::plain(Key::Char('5')));
         assert!(
-            !event_loop.warnings.visible,
+            !event_loop.info.visible,
             "the panel (drawn on top) takes the key first"
         );
         assert!(
@@ -2015,28 +2158,135 @@ mod tests {
 
         // Too small to draw the box → the reopened panel must not block: the
         // key falls through to the prompt and the panel stays for later.
-        event_loop.dispatch(EditorAction::WarningsShow);
+        event_loop.dispatch(EditorAction::InfoShow);
         event_loop.screen_size = (80, 5);
         event_loop.handle_key(KeyEvent::plain(Key::Esc));
         assert!(
-            event_loop.warnings.visible,
+            event_loop.info.visible,
             "an undrawable panel must not swallow keys"
         );
         assert!(!event_loop.prompt.visible, "Esc reached the prompt instead");
     }
 
-    /// TASK-260820: with a clean config the panel never appears, and
-    /// `warnings.show` says so instead of opening an empty box.
+    /// TASK-260820: with a clean config and quiet environment the panel
+    /// never appears, and `info.show` says so instead of opening an empty
+    /// box.
     #[test]
-    fn warnings_show_without_warnings_reports_in_the_status_bar() {
+    fn info_show_without_content_reports_in_the_status_bar() {
         let mut event_loop =
             EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
-        event_loop.set_config_warnings(Vec::new());
-        assert!(!event_loop.warnings.visible);
+        startup_info(&mut event_loop, Vec::new());
+        assert!(!event_loop.info.visible);
 
-        event_loop.dispatch(EditorAction::WarningsShow);
-        assert!(!event_loop.warnings.visible);
-        assert_eq!(event_loop.message, "no config warnings");
+        event_loop.dispatch(EditorAction::InfoShow);
+        assert!(!event_loop.info.visible);
+        assert_eq!(event_loop.message, "no config warnings or environment info");
+    }
+
+    /// codex round: a Ghostty whose `+list-keybinds` query failed must be
+    /// reported as unknown, never mistaken for "queried, nothing
+    /// intercepted" and silently skipped.
+    #[test]
+    fn ghostty_query_failure_is_reported_not_treated_as_clean() {
+        let mut event_loop =
+            EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.ghostty_quirks.clear();
+        event_loop.quirks_queried = false;
+        event_loop.set_startup_info(Vec::new(), &[], None, true);
+
+        assert!(
+            event_loop.info.visible,
+            "a failed query must not read as a clean environment"
+        );
+    }
+
+    /// codex round: scroll keys move the panel window instead of dismissing,
+    /// so every line is readable before dismissal acknowledges the report.
+    #[test]
+    fn info_panel_scrolls_with_arrows_and_dismisses_on_other_keys() {
+        let mut event_loop =
+            EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        startup_info(
+            &mut event_loop,
+            (0..40).map(|i| format!("warning {i}")).collect(),
+        );
+        assert!(event_loop.info.visible);
+
+        event_loop.handle_key(KeyEvent::plain(Key::Down));
+        event_loop.handle_key(KeyEvent::plain(Key::PageDown));
+        assert!(
+            event_loop.info.visible,
+            "scroll keys never dismiss the panel"
+        );
+
+        event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
+        assert!(!event_loop.info.visible, "other keys still dismiss");
+    }
+
+    /// TASK-260820-environment-info-panel: the startup status bar carries
+    /// the rescue hint (plus short per-file notices), never the environment
+    /// report.
+    #[test]
+    fn startup_message_is_the_palette_hint() {
+        let event_loop =
+            EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        assert_eq!(event_loop.message, "F1: command palette");
+    }
+
+    /// The intercept report carries a ready-to-paste fix per lost binding —
+    /// the panel's whole point ("change this and it works") — plus the
+    /// restart/verify closing step. Reuses the same fixture path as the
+    /// inspector tests.
+    #[test]
+    fn ghostty_intercept_report_lists_fixes_per_lost_binding() {
+        use crate::keymap::{Binding, Source, parse_key_sequence};
+
+        // Defaults bind cmd+w (buffer.close); cmd+q (app.quit) simulates a
+        // user binding on a chord whose only fix would revive Ghostty's own
+        // quit — the honest "no portable fix" case.
+        let mut bindings = bindings_for(Platform::MacOs);
+        bindings.push(Binding::new(
+            parse_key_sequence("cmd+q").unwrap(),
+            EditorAction::AppQuit,
+            None,
+            Source::User,
+        ));
+        let resolver = Resolver::new(bindings);
+        let quirks = parse_ghostty_keybinds(
+            "keybind = super+w=close_surface\nkeybind = super+q=quit\n\
+             keybind = super+t=new_tab\n",
+        );
+
+        let report = super::ghostty_intercept_report(&quirks, &resolver);
+
+        // super+t has no live binding, so there is nothing to lose and it is
+        // filtered out; the two bound chords each get one line.
+        assert_eq!(
+            report.first().map(String::as_str),
+            Some("Ghostty intercepts 2 binding(s) before they reach coda:")
+        );
+        assert!(
+            report[1].contains("buffer.close")
+                && report[1].contains("fix: keybind = super+w=unbind"),
+            "cmd+w gets its paste-ready fix: {:?}",
+            report[1]
+        );
+        assert!(
+            report[2].contains("app.quit") && report[2].contains("no portable fix"),
+            "cmd+q is honestly reported as unfixable: {:?}",
+            report[2]
+        );
+        assert!(
+            report
+                .last()
+                .is_some_and(|line| line.contains("restart Ghostty")),
+            "closing step present: {report:?}"
+        );
+
+        assert!(
+            super::ghostty_intercept_report(&[], &resolver).is_empty(),
+            "no quirks, no report"
+        );
     }
 
     #[test]
@@ -2464,75 +2714,35 @@ keybind = super+digit_1=goto_tab:1
 ";
 
     #[test]
-    fn ghostty_warning_suppresses_same_action_translation_but_flags_consumed_binds() {
+    fn ghostty_report_suppresses_same_action_translation_but_flags_consumed_binds() {
         let quirks = parse_ghostty_keybinds(GHOSTTY_FIXTURE);
         let resolver = Resolver::new(bindings_for(Platform::MacOs));
 
-        let warning =
-            ghostty_intercept_warning(&quirks, &resolver).expect("some quirks are warn-worthy");
+        let report = super::ghostty_intercept_report(&quirks, &resolver);
+        let body = report.join("\n");
+        assert!(!report.is_empty(), "some quirks are warn-worthy");
 
         // cmd+left is translated to ^A, which resolves to the same
         // cursor.lineStart action as the cmd+left default binding (ADR-0011)
         // — the terminal rewrite is harmless, so it must not be reported.
         assert!(
-            !warning.contains("Left"),
-            "cmd+left same-action translation must be suppressed: {warning}"
+            !body.contains("Left"),
+            "cmd+left same-action translation must be suppressed: {body}"
         );
         // cmd+f (start_search) and cmd+a (select_all) are consumed outright
         // by Ghostty and coda has default bindings on both chords, so both
-        // must be flagged.
-        assert!(warning.contains('F'), "cmd+f must be flagged: {warning}");
-        assert!(warning.contains('A'), "cmd+a must be flagged: {warning}");
+        // must be flagged with their fixes.
+        assert!(
+            body.contains("Cmd+F") && body.contains("keybind = super+f=unbind"),
+            "cmd+f must be flagged with a fix: {body}"
+        );
+        assert!(body.contains("Cmd+A"), "cmd+a must be flagged: {body}");
         // cmd+v is bound to edit.paste, but Ghostty's paste_from_clipboard
         // delivers the same operation as a bracketed paste (ADR-0008) —
         // the sanctioned delegation must not be reported as interception.
         assert!(
-            !warning.contains("Cmd+V"),
-            "cmd+v paste delegation must be suppressed: {warning}"
-        );
-    }
-
-    #[test]
-    fn ghostty_warning_is_none_when_no_quirks_hit_a_binding() {
-        let resolver = Resolver::new(bindings_for(Platform::MacOs));
-        assert_eq!(ghostty_intercept_warning(&[], &resolver), None);
-    }
-
-    #[test]
-    fn format_intercept_warning_is_none_for_empty_list() {
-        assert_eq!(format_intercept_warning(&[]), None);
-    }
-
-    #[test]
-    fn format_intercept_warning_lists_up_to_three_examples_without_truncation() {
-        let affected = vec![
-            "Cmd+A".to_string(),
-            "Cmd+F".to_string(),
-            "Cmd+W".to_string(),
-        ];
-        assert_eq!(
-            format_intercept_warning(&affected),
-            Some(
-                "Ghostty intercepts 3 bindings: Cmd+A, Cmd+F, Cmd+W — run inspector.open for details"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn format_intercept_warning_truncates_beyond_three_examples() {
-        let affected = vec![
-            "Cmd+A".to_string(),
-            "Cmd+F".to_string(),
-            "Cmd+W".to_string(),
-            "Cmd+C".to_string(),
-        ];
-        assert_eq!(
-            format_intercept_warning(&affected),
-            Some(
-                "Ghostty intercepts 4 bindings: Cmd+A, Cmd+F, Cmd+W, … — run inspector.open for details"
-                    .to_string()
-            )
+            !body.contains("Cmd+V"),
+            "cmd+v paste delegation must be suppressed: {body}"
         );
     }
 
