@@ -329,7 +329,7 @@ fn body_lines(
     lines
 }
 
-fn frame_line(left: &str, fill: &str, right: &str, title: &str, width: usize) -> String {
+pub(crate) fn frame_line(left: &str, fill: &str, right: &str, title: &str, width: usize) -> String {
     let inner = width.saturating_sub(2);
     let title = clip_to_width(title, inner);
     let title_len = title.chars().count();
@@ -339,7 +339,7 @@ fn frame_line(left: &str, fill: &str, right: &str, title: &str, width: usize) ->
     )
 }
 
-fn clip_to_width(text: &str, width: usize) -> String {
+pub(crate) fn clip_to_width(text: &str, width: usize) -> String {
     text.chars().take(width).collect()
 }
 

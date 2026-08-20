@@ -35,6 +35,7 @@ use super::{
     palette::{CommandPalette, filter_actions},
     prompt_overlay::{PromptOutcome, PromptOverlay, PromptPurpose, draw_prompt_overlay},
     search_overlay::{SearchOverlay, draw_search_overlay},
+    warnings::{WarningsOverlay, draw_warnings},
     which_key::{draw_which_key, which_key_lines},
 };
 
@@ -117,6 +118,8 @@ pub struct EventLoop {
     /// `file.saveAs` (TASK-260712 Gate 1).
     prompt: PromptOverlay,
     inspector: InspectorOverlay,
+    /// Startup panel for config-breakage warnings (TASK-260820).
+    warnings: WarningsOverlay,
     message: String,
     clipboard: String,
     pending_terminal_write: Vec<u8>,
@@ -231,6 +234,7 @@ impl EventLoop {
             search: SearchOverlay::default(),
             prompt: PromptOverlay::default(),
             inspector: InspectorOverlay::default(),
+            warnings: WarningsOverlay::default(),
             message: warnings.join("; "),
             clipboard: String::new(),
             pending_terminal_write: Vec::new(),
@@ -251,6 +255,14 @@ impl EventLoop {
             last_click: None,
             follow_cursor: true,
         })
+    }
+
+    /// Routes config-breakage warnings (bindings.json / config.toml load
+    /// issues) to the blocking startup panel instead of the one-line status
+    /// bar, where they truncate out of view unread (TASK-260820). The panel
+    /// only opens when `warnings` is non-empty.
+    pub fn set_config_warnings(&mut self, warnings: Vec<String>) {
+        self.warnings.set_startup_warnings(warnings);
     }
 
     /// Rebuilds only the default Ctrl+C policy while preserving user and
@@ -518,6 +530,7 @@ impl EventLoop {
         // Inspector before palette: when both are visible, the palette (its
         // rescue entry point always wins per AGENTS.md) draws on top.
         draw_inspector(screen, &self.inspector, self.capability_detection);
+        draw_warnings(screen, &self.warnings);
         super::palette::draw_palette(screen, &self.palette, &items);
     }
 
@@ -545,7 +558,13 @@ impl EventLoop {
         if mouse.modifiers.contains_shift() {
             return QuitDecision::Continue;
         }
-        if self.palette.visible || self.prompt.visible || self.inspector.visible {
+        if self.palette.visible
+            || self.prompt.visible
+            || self.inspector.visible
+            || self
+                .warnings
+                .blocks_input(self.screen_size.0, self.screen_size.1)
+        {
             return QuitDecision::Continue;
         }
         match mouse.kind {
@@ -745,6 +764,14 @@ impl EventLoop {
         let sanitized = text.replace('\n', "");
         if self.palette.visible {
             self.palette.push_text(&sanitized);
+        } else if self
+            .warnings
+            .blocks_input(self.screen_size.0, self.screen_size.1)
+        {
+            // Same swallow rule and priority as keys: a paste aimed at the
+            // editor while the panel is up must not land in the buffer (or
+            // an overlay hidden underneath) unseen.
+            self.warnings.close();
         } else if self.prompt.visible {
             self.prompt.paste_text(&sanitized);
         } else if self.inspector.visible {
@@ -786,6 +813,24 @@ impl EventLoop {
             && let Some(decision) = self.handle_palette_key(&event)
         {
             return decision;
+        }
+
+        // Input priority mirrors draw order: the panel is rendered above the
+        // prompt/inspector overlays (and below the palette), so it must also
+        // take keys before them — otherwise "press any key to dismiss" would
+        // feed an overlay hidden underneath. `blocks_input` is false when
+        // the screen is too small to draw the panel: an invisible overlay
+        // must never swallow input.
+        if self
+            .warnings
+            .blocks_input(self.screen_size.0, self.screen_size.1)
+        {
+            // Hit-enter convention: the dismissing key is swallowed so a
+            // keystroke aimed at the panel never edits the buffer under it.
+            // F1 stays the exception (handled above): the palette opens on
+            // top without losing the panel.
+            self.warnings.close();
+            return QuitDecision::Continue;
         }
 
         if self.prompt.visible {
@@ -1090,6 +1135,11 @@ impl EventLoop {
                 self.search.close();
                 self.inspector.open();
                 self.message = "inspect-key: press any key".to_string();
+            }
+            EditorAction::WarningsShow => {
+                if !self.warnings.reopen() {
+                    self.message = "no config warnings".to_string();
+                }
             }
             EditorAction::ViewToggleWrap => {
                 self.wrap = !self.wrap;
@@ -1899,6 +1949,86 @@ mod tests {
         assert!(context.replace_visible);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn warning_panel_swallows_the_dismissing_key_and_reopens_from_palette() {
+        let mut event_loop =
+            EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.set_config_warnings(vec!["bindings.json: trailing comma".to_string()]);
+        assert!(
+            event_loop.warnings.visible,
+            "startup warnings open the panel"
+        );
+        let untouched = buffer_text(&event_loop);
+
+        // F1 rescue stays available on top of the panel without dismissing it.
+        event_loop.handle_key(KeyEvent::plain(Key::F(1)));
+        assert!(event_loop.palette.visible);
+        assert!(event_loop.warnings.visible, "F1 does not dismiss the panel");
+        event_loop.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(!event_loop.palette.visible);
+
+        event_loop.handle_key(KeyEvent::plain(Key::Char('x')));
+        assert!(!event_loop.warnings.visible, "any other key dismisses");
+        assert_eq!(
+            buffer_text(&event_loop),
+            untouched,
+            "the dismissing key never reaches the buffer"
+        );
+
+        event_loop.dispatch(EditorAction::WarningsShow);
+        assert!(
+            event_loop.warnings.visible,
+            "warnings.show reopens the panel"
+        );
+    }
+
+    /// TASK-260820 (codex review round 1): input priority mirrors draw order
+    /// — the panel takes keys before the prompt/inspector overlays drawn
+    /// beneath it — and a panel the screen cannot draw never swallows input.
+    #[test]
+    fn warning_panel_takes_keys_before_lower_overlays_and_skips_tiny_screens() {
+        let mut event_loop =
+            EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.set_config_warnings(vec!["bindings.json: broken".to_string()]);
+        event_loop.dispatch(EditorAction::GoToLine);
+        assert!(event_loop.prompt.visible, "prompt opens under the panel");
+
+        event_loop.handle_key(KeyEvent::plain(Key::Char('5')));
+        assert!(
+            !event_loop.warnings.visible,
+            "the panel (drawn on top) takes the key first"
+        );
+        assert!(
+            event_loop.prompt.visible,
+            "the dismissing key never reaches the prompt underneath"
+        );
+
+        // Too small to draw the box → the reopened panel must not block: the
+        // key falls through to the prompt and the panel stays for later.
+        event_loop.dispatch(EditorAction::WarningsShow);
+        event_loop.screen_size = (80, 5);
+        event_loop.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(
+            event_loop.warnings.visible,
+            "an undrawable panel must not swallow keys"
+        );
+        assert!(!event_loop.prompt.visible, "Esc reached the prompt instead");
+    }
+
+    /// TASK-260820: with a clean config the panel never appears, and
+    /// `warnings.show` says so instead of opening an empty box.
+    #[test]
+    fn warnings_show_without_warnings_reports_in_the_status_bar() {
+        let mut event_loop =
+            EventLoop::open_many(Vec::new(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        event_loop.set_config_warnings(Vec::new());
+        assert!(!event_loop.warnings.visible);
+
+        event_loop.dispatch(EditorAction::WarningsShow);
+        assert!(!event_loop.warnings.visible);
+        assert_eq!(event_loop.message, "no config warnings");
     }
 
     #[test]

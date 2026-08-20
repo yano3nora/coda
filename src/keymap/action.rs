@@ -68,6 +68,7 @@ pub enum EditorAction {
     GoToLine,
     AppQuit,
     InspectorOpen,
+    WarningsShow,
     ConfigOpenSettings,
     ConfigOpenKeybindings,
 }
@@ -135,6 +136,7 @@ impl EditorAction {
         Self::GoToLine,
         Self::AppQuit,
         Self::InspectorOpen,
+        Self::WarningsShow,
         Self::ConfigOpenSettings,
         Self::ConfigOpenKeybindings,
     ];
@@ -203,6 +205,7 @@ impl EditorAction {
             Self::AppQuit => "app.quit",
             Self::InspectorOpen => "inspector.open",
             Self::ConfigOpenSettings => "config.openSettings",
+            Self::WarningsShow => "warnings.show",
             Self::ConfigOpenKeybindings => "config.openKeybindings",
         }
     }
@@ -286,6 +289,7 @@ impl FromStr for EditorAction {
             "app.quit" => Ok(Self::AppQuit),
             "inspector.open" => Ok(Self::InspectorOpen),
             "config.openSettings" => Ok(Self::ConfigOpenSettings),
+            "warnings.show" => Ok(Self::WarningsShow),
             "config.openKeybindings" => Ok(Self::ConfigOpenKeybindings),
             _ => Err(ParseActionError(value.to_string())),
         }

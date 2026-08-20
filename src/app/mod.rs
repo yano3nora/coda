@@ -13,6 +13,7 @@ mod palette;
 mod prompt_overlay;
 mod search_overlay;
 mod verify_cli;
+mod warnings;
 mod which_key;
 
 use std::{env, ffi::OsString, path::PathBuf};
@@ -79,17 +80,18 @@ pub fn run() -> i32 {
 /// unnamed buffer (TASK-260711-19), the same buffer `buffer.new` creates —
 /// its Save writes to disk only once the user picks a location.
 fn run_editor(paths: Vec<PathBuf>, line: Option<usize>) -> i32 {
-    let mut warnings = Vec::new();
     let loaded_config = config::load();
-    warnings.extend(loaded_config.warnings);
 
     match EventLoop::open_many(
         paths,
-        warnings,
+        Vec::new(),
         loaded_config.user_bindings,
         loaded_config.theme,
     ) {
         Ok(mut loop_) => {
+            // Config-breakage warnings get the blocking panel; file notices
+            // and environment warnings stay in the status bar (TASK-260820).
+            loop_.set_config_warnings(loaded_config.warnings);
             loop_.set_wrap(loaded_config.wrap);
             loop_.set_sequence_timeout(std::time::Duration::from_millis(
                 loaded_config.sequence_timeout_ms,
