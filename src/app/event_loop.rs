@@ -420,23 +420,31 @@ impl EventLoop {
             let timeout = self.poll_timeout_ms();
             if poll_stdin_readable(timeout)? {
                 let mut chunk = [0_u8; 256];
-                let read = stdin.read(&mut chunk)?;
-                if read == 0 {
-                    break;
-                }
-                byte_buffer.extend_from_slice(&chunk[..read]);
-                if self.inspector.visible {
-                    // Chunk-level approximation (design decision 260712):
-                    // attribute the whole read chunk to whichever event(s) it
-                    // decodes into rather than tracking exact byte spans.
-                    self.inspector.push_raw(&chunk[..read]);
-                }
-                for event in drain_input_events(&mut byte_buffer) {
-                    if self.handle_input_event(event) == QuitDecision::Quit {
-                        return Ok(());
+                // EINTR (e.g. SIGWINCH on resize) is not a reason to quit;
+                // skip input handling and fall through to the housekeeping
+                // below, which picks up the pending resize flag.
+                let read = match stdin.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => Some(read),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => None,
+                    Err(error) => return Err(error),
+                };
+                if let Some(read) = read {
+                    byte_buffer.extend_from_slice(&chunk[..read]);
+                    if self.inspector.visible {
+                        // Chunk-level approximation (design decision 260712):
+                        // attribute the whole read chunk to whichever event(s)
+                        // it decodes into rather than tracking exact byte
+                        // spans.
+                        self.inspector.push_raw(&chunk[..read]);
                     }
+                    for event in drain_input_events(&mut byte_buffer) {
+                        if self.handle_input_event(event) == QuitDecision::Quit {
+                            return Ok(());
+                        }
+                    }
+                    self.flush_terminal_writes(alt.writer_mut())?;
                 }
-                self.flush_terminal_writes(alt.writer_mut())?;
             } else if let Some(event) = flush_pending_escape(&mut byte_buffer) {
                 if self.handle_key(event) == QuitDecision::Quit {
                     return Ok(());

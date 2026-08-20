@@ -28,16 +28,44 @@ static mut SIGNAL_RESTORE_TERMIOS: MaybeUninit<Termios> = MaybeUninit::uninit();
 /// Callers own decoding and timeout policy; this wrapper only keeps the
 /// terminal-specific readiness API inside the input layer.
 pub(crate) fn poll_stdin_readable(timeout_ms: i32) -> io::Result<bool> {
-    let mut fds = [libc::pollfd {
-        fd: STDIN_FILENO,
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
-    if result < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(result > 0 && fds[0].revents & libc::POLLIN != 0)
+    poll_fd_readable(STDIN_FILENO, timeout_ms)
+}
+
+fn poll_fd_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    // Absolute deadline (negative timeout = wait forever) so EINTR retries
+    // use the remaining time. Retrying with the full timeout each time would
+    // starve the event loop's housekeeping under a stream of SIGWINCH during
+    // an interactive resize drag.
+    let deadline = u64::try_from(timeout_ms)
+        .ok()
+        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    let mut remaining_ms = timeout_ms;
+    loop {
+        let mut fds = [libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let result =
+            unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, remaining_ms) };
+        if result >= 0 {
+            return Ok(result > 0 && fds[0].revents & libc::POLLIN != 0);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        // Signals (SIGWINCH on resize) interrupt poll with EINTR; retry for
+        // the remaining time instead of erroring so the event loop survives.
+        // Returning "no input" early instead would make callers treat an
+        // interrupt as an elapsed escape-flush timeout and misfire a bare ESC.
+        if let Some(deadline) = deadline {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            remaining_ms = i32::try_from(left.as_millis().max(1)).unwrap_or(i32::MAX);
+        }
     }
 }
 
@@ -174,8 +202,64 @@ fn set_read_behavior(termios: &mut Termios, min_bytes: u8, timeout_deciseconds: 
 
 #[cfg(test)]
 mod tests {
-    use super::{Termios, set_read_behavior};
+    use super::{Termios, poll_fd_readable, set_read_behavior};
     use libc::{VMIN, VTIME};
+
+    /// Regression test (TASK-260820 resize crash): a signal interrupting
+    /// `poll` (SIGWINCH on resize) must not surface as an error that unwinds
+    /// the event loop and closes the editor. SIGUSR1 stands in for SIGWINCH
+    /// so the test does not touch the production resize handler, which other
+    /// tests in this process may depend on; EINTR mechanics are identical.
+    #[test]
+    fn poll_interrupted_by_signal_retries_instead_of_erroring() {
+        extern "C" fn noop(_signal_number: libc::c_int) {}
+
+        let previous_action = unsafe {
+            // sigaction with sa_flags = 0 (no SA_RESTART) mirrors the worst
+            // case: the syscall is interrupted rather than auto-restarted.
+            let mut action: libc::sigaction = std::mem::zeroed();
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = noop as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            assert_eq!(libc::sigaction(libc::SIGUSR1, &action, &mut previous), 0);
+            previous
+        };
+
+        let mut pipe_fds = [0_i32; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let read_fd = pipe_fds[0];
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let poller = std::thread::spawn(move || {
+            sender
+                .send(unsafe { libc::pthread_self() } as usize)
+                .unwrap();
+            // Short timeout keeps the retried poll (post-fix behavior) from
+            // stalling the test suite; pre-fix this returned Err(EINTR).
+            poll_fd_readable(read_fd, 400)
+        });
+
+        let thread_id = receiver.recv().unwrap() as libc::pthread_t;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Asserting delivery matters: if the signal were never sent, the
+        // natural timeout would also yield Ok(false) and hide a regression.
+        assert_eq!(
+            unsafe { libc::pthread_kill(thread_id, libc::SIGUSR1) },
+            0,
+            "failed to interrupt the polling thread"
+        );
+
+        let result = poller.join().unwrap();
+        assert!(matches!(result, Ok(false)), "got {result:?}");
+
+        unsafe {
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR1, &previous_action, std::ptr::null_mut()),
+                0
+            );
+            libc::close(pipe_fds[0]);
+            libc::close(pipe_fds[1]);
+        }
+    }
 
     #[test]
     fn set_read_behavior_updates_vmin_and_vtime_only() {
