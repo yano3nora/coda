@@ -653,6 +653,27 @@ mod tests {
         );
     }
 
+    /// split view は coda の責務範囲外 (TASK-260820 で対応表から削除)。
+    /// import は失敗ではなく「範囲外」として報告される。
+    #[test]
+    fn split_commands_are_ignored_as_outside_editor_scope() {
+        let fixture = r#"[
+            { "key": "cmd+\\", "command": "workbench.action.splitEditor" },
+            { "key": "cmd+k cmd+right", "command": "workbench.action.focusNextGroup" },
+            { "key": "cmd+k cmd+left", "command": "workbench.action.focusPreviousGroup" }
+        ]"#;
+
+        let imported =
+            import_vscode_keybindings(fixture, &KeyboardCapabilities::modern(), CmdStrategy::Keep)
+                .expect("fixture parses");
+
+        assert!(imported.bindings.is_empty());
+        assert_eq!(imported.report.ignored.len(), 3);
+        for entry in &imported.report.ignored {
+            assert_eq!(entry.reason, "outside editor scope");
+        }
+    }
+
     #[test]
     fn imports_clipboard_commands_as_imported_bindings() {
         let fixture = r#"[

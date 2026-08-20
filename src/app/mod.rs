@@ -95,10 +95,14 @@ fn run_editor(paths: Vec<PathBuf>, line: Option<usize>) -> i32 {
             ));
             loop_.set_capability_warning(loaded_config.capability_warning);
             loop_.set_ctrl_c_quits(loaded_config.ctrl_c_quits);
-            loop_.disable_chords(&loaded_config.disabled_chords);
+            // palette_key BEFORE disable_chords: verify may have measured the
+            // default ctrl+space as undeliverable, and replacing an already
+            // removed rescue binding would silently ignore the config value.
+            // This order lets disable_chords judge the user's actual chord.
             if let Some(palette_key) = loaded_config.palette_key {
                 loop_.set_palette_key(palette_key);
             }
+            loop_.disable_chords(&loaded_config.disabled_chords);
             // Config-breakage warnings and the environment report go to the
             // startup info panel; the status bar keeps only the palette hint
             // and short per-file notices (TASK-260820-environment-info-panel).

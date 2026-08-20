@@ -19,33 +19,50 @@ const MAX_CANDIDATE_ROWS: usize = 10;
 /// the exact-match row that a sequence timeout would fire. Candidates are
 /// shown by their *remaining* keys (the typed prefix is in the title), left
 /// aligned so the action column lines up.
+///
+/// A candidate whose remaining chord is in `undelivered_chords` (a
+/// quirk-intercepted trigger) can never complete in this terminal: its row is
+/// annotated and flagged (`bool` = draw dimmed) instead of silently listed as
+/// if it worked.
 pub(crate) fn which_key_lines(
     pending: &[KeyEvent],
     candidates: &[(Vec<KeyEvent>, EditorAction)],
     exact: Option<EditorAction>,
-) -> Vec<String> {
-    let mut entries: Vec<(String, String)> = candidates
+    undelivered_chords: &[KeyEvent],
+) -> Vec<(String, bool)> {
+    let mut entries: Vec<(String, String, bool)> = candidates
         .iter()
-        .map(|(keys, action)| (format_keys(&keys[pending.len()..]), action.to_string()))
+        .map(|(keys, action)| {
+            let remaining = &keys[pending.len()..];
+            (
+                format_keys(remaining),
+                action.to_string(),
+                remaining.iter().any(|key| undelivered_chords.contains(key)),
+            )
+        })
         .collect();
     entries.sort();
 
     let mut lines = Vec::new();
     if let Some(action) = exact {
-        lines.push(format!("(wait) {action}"));
+        lines.push((format!("(wait) {action}"), false));
     }
 
     let shown = entries.len().min(MAX_CANDIDATE_ROWS);
     let key_width = entries[..shown]
         .iter()
-        .map(|(keys, _)| keys.chars().count())
+        .map(|(keys, _, _)| keys.chars().count())
         .max()
         .unwrap_or(0);
-    for (keys, action) in &entries[..shown] {
-        lines.push(format!("{keys:key_width$}  {action}"));
+    for (keys, action, undelivered) in &entries[..shown] {
+        let mut line = format!("{keys:key_width$}  {action}");
+        if *undelivered {
+            line.push_str("  ✗ undelivered");
+        }
+        lines.push((line, *undelivered));
     }
     if entries.len() > shown {
-        lines.push(format!("… {} more", entries.len() - shown));
+        lines.push((format!("… {} more", entries.len() - shown), false));
     }
     lines
 }
@@ -53,7 +70,7 @@ pub(crate) fn which_key_lines(
 /// Draws the which-key panel anchored just above the status line, following
 /// the inspector's boxed-overlay conventions. `pending_label` is the typed
 /// prefix (also shown in the status bar) used as the box title.
-pub(crate) fn draw_which_key(screen: &mut Screen, pending_label: &str, lines: &[String]) {
+pub(crate) fn draw_which_key(screen: &mut Screen, pending_label: &str, lines: &[(String, bool)]) {
     if lines.is_empty() || screen.height() < 6 || screen.width() < 12 {
         return;
     }
@@ -89,9 +106,12 @@ pub(crate) fn draw_which_key(screen: &mut Screen, pending_label: &str, lines: &[
         screen.put_str(box_x, y, &line, dim);
     }
 
-    for (row, line) in lines.iter().take(shown).enumerate() {
+    for (row, (line, undelivered)) in lines.iter().take(shown).enumerate() {
         let clipped = clip_to_width(line, inner_width);
-        screen.put_str(box_x + 2, box_top + 1 + row as u16, &clipped, normal);
+        // The whole row dims: an undeliverable continuation makes the entire
+        // sequence unusable, unlike the palette where the action still runs.
+        let style = if *undelivered { dim } else { normal };
+        screen.put_str(box_x + 2, box_top + 1 + row as u16, &clipped, style);
     }
 }
 
@@ -162,11 +182,11 @@ mod tests {
         ];
 
         for (name, candidates, exact, expected) in cases {
-            assert_eq!(
-                which_key_lines(&pending, candidates, *exact),
-                *expected,
-                "{name}"
-            );
+            let lines: Vec<String> = which_key_lines(&pending, candidates, *exact, &[])
+                .into_iter()
+                .map(|(line, _)| line)
+                .collect();
+            assert_eq!(lines, *expected, "{name}");
         }
     }
 
@@ -178,9 +198,29 @@ mod tests {
             .map(|c| candidate(&format!("ctrl+k ctrl+{c}"), EditorAction::CursorUp))
             .collect();
 
-        let lines = which_key_lines(&pending, &candidates, None);
+        let lines = which_key_lines(&pending, &candidates, None, &[]);
 
         assert_eq!(lines.len(), MAX_CANDIDATE_ROWS + 1);
-        assert_eq!(lines.last().unwrap(), "… 3 more");
+        assert_eq!(lines.last().unwrap().0, "… 3 more");
+    }
+
+    #[test]
+    fn which_key_lines_flag_undeliverable_continuations() {
+        let pending = parse_key_sequence("ctrl+k").unwrap();
+        let candidates = vec![
+            candidate("ctrl+k ctrl+u", EditorAction::CursorUp),
+            candidate("ctrl+k alt+d", EditorAction::CursorDown),
+        ];
+        let undelivered = parse_key_sequence("alt+d").unwrap();
+
+        let lines = which_key_lines(&pending, &candidates, None, &undelivered);
+
+        assert_eq!(
+            lines,
+            vec![
+                ("Alt+D   cursor.down  ✗ undelivered".to_string(), true),
+                ("Ctrl+U  cursor.up".to_string(), false),
+            ]
+        );
     }
 }

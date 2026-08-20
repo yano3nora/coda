@@ -1,38 +1,16 @@
-# Backlog
+# Backlogs — 未解決／積み残しタスク
 
-日付に依存しない deferred task の索引。v0.1 までの作業と release gate は
-[v0.1 release readiness](TASK-260712-v0.1-release-readiness.md)を正とする。
+> **Status: 常設 (クローズしない)**。未着手・保留・トリガー待ちのタスクを一元管理する唯一の置き場。
+> 各 TASK の残項目はここに集約済みなので、過去 TASK を漁る必要はない。
 
-## P1: v0.1 後に早めに欲しい
+## 運用ルール
 
-- 完了 (260712) → [TASK-260712 which-key / config / --cmd](TASK-260712-which-key-config-cmd.md)
+1. 次の作業を始めるときは、ここから 1 件 pick して `TASK-YYMMDD-<slug>.md` を新規作成する
+2. pick した項目は本ファイルから削除し、新 TASK へのリンクに差し替える
+3. 新しい未解決事項が出たら、他の TASK には「BACKLOGへ追加」だけ書いてここへ追記する
+4. ADR, SPEC の Open Questions と重複する項目は、決着時に ADR, SPEC 側も更新すること
 
-## P2: v0.2 候補
+## Backlogs
+- [ ] 他 editor profile import（Zed / Sublime / JetBrains）
+- [ ] (着手前に要検討) tree-sitter への highlighting engine 差し替え
 
-- ~~split views: vertical / horizontal、pane focus、maximize~~
-  - split は多機能 editor のやることであり、現時点の coda の責務範囲ではない
-- 完了 (260712) → [TASK-260712 mouse / verify / inactive / SSH bootstrap](TASK-260712-mouse-verify-inactive-ssh.md)
-- 完了 (260713) → [TASK-260713 mouse / palette / go to line](TASK-260713-mouse-palette-goto-line.md)
-- 完了 (260713) → [TASK-260713 P2 key delivery completion](TASK-260713-p2-key-delivery.md)
-
-## P2: v0.2 候補 (追加)
-
-- [ ] palette / which-key で「この terminal では届かない binding」を dim + 注記する
-  (260820 environment info panel の段階 2。届かないと知るべき瞬間は palette で
-  binding を見た瞬間。データ源は quirks 検出 + keymap verify の実測結果)
-
-## Deferred: 着手前に再判断
-
-- [ ] 他 editor profile import（Zed / Sublime / JetBrains / Helix）
-- [ ] tree-sitter への highlighting engine 差し替え
-- [ ] user theme / recent files / fuzzy file open / read-only mode / diff mode
-- [ ] OSC 52 拒否環境の local fallback（pbcopy / xclip / wl-copy）
-- [ ] Homebrew / crates.io / mise registry への配布拡大
-- [ ] GitHub Actions による CI（macOS + Linux での fmt / clippy / test。260712 に一度作成したが「複数 platform test を常時回す段階ではない」ため撤去。contributor が増えた時点で再判断）
-- [ ] GitHub Actions による tag 起点の自動 publish
-
-## 運用
-
-- 着手時に日付付き TASK を作り、この一覧から詳細を移す
-- 同日の TASK が複数あっても `TASK-YYMMDD-topic.md` の内容名で区別する
-- 機能追加前に「terminal での短時間編集を改善するか」「keymap import より優先か」を確認する

@@ -144,6 +144,10 @@ pub struct EventLoop {
     /// Whether `ghostty +list-keybinds` actually answered. `false` with an
     /// empty quirk list means "we could not look", never "nothing found".
     quirks_queried: bool,
+    /// Bindings `disable_chords` removed from the resolver (chord measured as
+    /// mismatched by `keymap verify`). Kept so the palette can show them dim
+    /// + annotated instead of letting the key silently vanish (SPEC-0003).
+    disabled_bindings: Vec<crate::keymap::Binding>,
     /// In-flight keyboard capability detection, armed by `run()` right after
     /// the protocol push. `None` once resolved (or if never armed, as in
     /// `EventLoop::open`/`open_many` used by tests without a real terminal)
@@ -257,6 +261,7 @@ impl EventLoop {
             save_as_overwrite_confirm: None,
             ghostty_quirks,
             quirks_queried,
+            disabled_bindings: Vec::new(),
             capability_probe: None,
             capability_detection: None,
             wrap: false,
@@ -350,19 +355,70 @@ impl EventLoop {
 
     /// Removes every binding containing a chord measured as mismatched for
     /// this exact terminal program/version. Sequences are atomic: if one
-    /// chord cannot arrive, the whole binding is unusable.
+    /// chord cannot arrive, the whole binding is unusable. The removed
+    /// bindings are retained in `disabled_bindings` for the palette's
+    /// dim + `✗ undelivered` display.
     pub(crate) fn disable_chords(&mut self, disabled: &[KeyEvent]) {
         if disabled.is_empty() {
             return;
         }
-        let bindings = self
+        let (kept, removed): (Vec<_>, Vec<_>) = self
             .resolver
             .bindings()
             .iter()
-            .filter(|binding| !binding.keys.iter().any(|key| disabled.contains(key)))
             .cloned()
-            .collect();
-        self.resolver = Resolver::new(bindings);
+            .partition(|binding| !binding.keys.iter().any(|key| disabled.contains(key)));
+        // extend, not overwrite: a second call (config reload, tests) must
+        // not drop bindings retained by an earlier one.
+        self.disabled_bindings.extend(removed);
+        self.resolver = Resolver::new(kept);
+    }
+
+    /// Every quirk trigger: a chord this terminal intercepts and never
+    /// delivers as itself. The full set, not just triggers with a live
+    /// single-chord binding — a trigger that resolves to nothing on its own
+    /// can still sit inside a sequence binding and break it. Verify
+    /// mismatches are not listed here — `disable_chords` already pulled those
+    /// bindings out, and the palette shows them via `disabled_bindings`.
+    fn blocked_chords(&self) -> Vec<KeyEvent> {
+        self.ghostty_quirks
+            .iter()
+            .map(|quirk| quirk.trigger.clone())
+            .collect()
+    }
+
+    /// Triggers whose interception is harmless for a *single-chord* binding
+    /// (paste delegation, translated-to-same-action — see
+    /// `quirk_intercepted_action`): those bindings still work in practice and
+    /// must not be dimmed. The exemption never applies inside a sequence,
+    /// where the terminal's rewrite always breaks the chain.
+    fn harmless_single_chords(&self) -> Vec<KeyEvent> {
+        let context = EditorContext::default();
+        self.ghostty_quirks
+            .iter()
+            .filter(|quirk| {
+                resolved_action(
+                    &self.resolver,
+                    std::slice::from_ref(&quirk.trigger),
+                    &context,
+                )
+                .is_some()
+                    && quirk_intercepted_action(quirk, &self.resolver, &context).is_none()
+            })
+            .map(|quirk| quirk.trigger.clone())
+            .collect()
+    }
+
+    /// Palette items for the current query, with undelivered marks from both
+    /// data sources (quirk interception, `keymap verify` measurements).
+    fn palette_items(&self) -> Vec<super::palette::PaletteItem> {
+        filter_actions(
+            &self.palette.query,
+            self.resolver.bindings(),
+            &self.disabled_bindings,
+            &self.blocked_chords(),
+            &self.harmless_single_chords(),
+        )
     }
 
     /// Applies the `[editor] wrap` startup default from config.toml
@@ -598,10 +654,15 @@ impl EventLoop {
             && let ResolveResult::Pending { exact, candidates } =
                 self.resolver.resolve(&self.pending_keys, &self.context())
         {
-            let lines = which_key_lines(&self.pending_keys, &candidates, exact);
+            let lines = which_key_lines(
+                &self.pending_keys,
+                &candidates,
+                exact,
+                &self.blocked_chords(),
+            );
             draw_which_key(screen, &pending, &lines);
         }
-        let items = filter_actions(&self.palette.query, self.resolver.bindings());
+        let items = self.palette_items();
         draw_search_overlay(screen, &self.search);
         draw_prompt_overlay(screen, &self.prompt);
         // Inspector before palette: when both are visible, the palette (its
@@ -977,27 +1038,27 @@ impl EventLoop {
                 Some(QuitDecision::Continue)
             }
             Key::Up if event.modifiers == Modifiers::none() => {
-                let count = filter_actions(&self.palette.query, self.resolver.bindings()).len();
+                let count = self.palette_items().len();
                 self.palette.move_selection(-1, count);
                 Some(QuitDecision::Continue)
             }
             Key::Char('p') if event.modifiers == Modifiers::none().with_ctrl() => {
-                let count = filter_actions(&self.palette.query, self.resolver.bindings()).len();
+                let count = self.palette_items().len();
                 self.palette.move_selection(-1, count);
                 Some(QuitDecision::Continue)
             }
             Key::Down if event.modifiers == Modifiers::none() => {
-                let count = filter_actions(&self.palette.query, self.resolver.bindings()).len();
+                let count = self.palette_items().len();
                 self.palette.move_selection(1, count);
                 Some(QuitDecision::Continue)
             }
             Key::Char('n') if event.modifiers == Modifiers::none().with_ctrl() => {
-                let count = filter_actions(&self.palette.query, self.resolver.bindings()).len();
+                let count = self.palette_items().len();
                 self.palette.move_selection(1, count);
                 Some(QuitDecision::Continue)
             }
             Key::Enter if event.modifiers == Modifiers::none() => {
-                let items = filter_actions(&self.palette.query, self.resolver.bindings());
+                let items = self.palette_items();
                 if let Some(action) = self.palette.selected_action(&items) {
                     self.palette.close();
                     return Some(self.dispatch(action));
@@ -1318,7 +1379,6 @@ impl EventLoop {
                     self.message = "unsaved changes; press quit again to exit".to_string();
                 }
             },
-            other => self.message = format!("{other}: not implemented yet"),
         }
         QuitDecision::Continue
     }
@@ -1728,47 +1788,26 @@ fn ghostty_intercept_report(quirks: &[TerminalQuirk], resolver: &Resolver) -> Ve
 
     let mut entries = Vec::new();
     for quirk in quirks {
-        let Some(trigger_action) =
-            resolved_action(resolver, std::slice::from_ref(&quirk.trigger), &context)
-        else {
+        let Some(trigger_action) = quirk_intercepted_action(quirk, resolver, &context) else {
             continue;
         };
 
-        let warn = match &quirk.effect {
-            // Ghostty's `paste_from_clipboard` is the sanctioned delivery
-            // path for paste (ADR-0008): the chord arrives as a bracketed
-            // paste of the OS clipboard, which coda accepts — strictly
-            // better than the internal-clipboard `edit.paste` binding it
-            // shadows, so it is not an interception worth warning about.
-            QuirkEffect::Consumed { action } => {
-                let is_paste_delegation =
-                    action == "paste_from_clipboard" || action.starts_with("paste_from_clipboard:");
-                !(is_paste_delegation && trigger_action == EditorAction::EditPaste)
-            }
-            QuirkEffect::Translated { events, .. } => {
-                events.is_empty()
-                    || resolved_action(resolver, events, &context) != Some(trigger_action)
-            }
-        };
-
-        if warn {
-            // Fix reasons (menu-shortcut caveats etc.) stay in the
-            // inspector, which shows them per keypress; the panel is the
-            // compact "change this and it works" list.
-            entries.push(match suggest_ghostty_fix(quirk) {
-                Some(suggestion) => format!(
-                    "  {} ({}) — fix: {}",
-                    quirk.trigger,
-                    trigger_action.as_str(),
-                    suggestion.config_line
-                ),
-                None => format!(
-                    "  {} ({}) — no portable fix (OS/terminal reserved)",
-                    quirk.trigger,
-                    trigger_action.as_str()
-                ),
-            });
-        }
+        // Fix reasons (menu-shortcut caveats etc.) stay in the
+        // inspector, which shows them per keypress; the panel is the
+        // compact "change this and it works" list.
+        entries.push(match suggest_ghostty_fix(quirk) {
+            Some(suggestion) => format!(
+                "  {} ({}) — fix: {}",
+                quirk.trigger,
+                trigger_action.as_str(),
+                suggestion.config_line
+            ),
+            None => format!(
+                "  {} ({}) — no portable fix (OS/terminal reserved)",
+                quirk.trigger,
+                trigger_action.as_str()
+            ),
+        });
     }
 
     if entries.is_empty() {
@@ -1785,6 +1824,38 @@ fn ghostty_intercept_report(quirks: &[TerminalQuirk], resolver: &Resolver) -> Ve
             .to_string(),
     );
     lines
+}
+
+/// The action a quirk actually takes away, or `None` when the quirk is
+/// harmless. A quirk only matters if a live binding sits on the trigger
+/// chord; a `Translated` quirk whose rewritten keystroke resolves to the
+/// *same* action is fine (the ADR-0011 case — `cmd+left` arrives as `ctrl+a`,
+/// both bound to `cursor.lineStart`). Shared by the startup interception
+/// report and the palette / which-key undelivered marks so the two can never
+/// disagree.
+fn quirk_intercepted_action(
+    quirk: &TerminalQuirk,
+    resolver: &Resolver,
+    context: &EditorContext,
+) -> Option<EditorAction> {
+    let trigger_action = resolved_action(resolver, std::slice::from_ref(&quirk.trigger), context)?;
+
+    let intercepted = match &quirk.effect {
+        // Ghostty's `paste_from_clipboard` is the sanctioned delivery
+        // path for paste (ADR-0008): the chord arrives as a bracketed
+        // paste of the OS clipboard, which coda accepts — strictly
+        // better than the internal-clipboard `edit.paste` binding it
+        // shadows, so it is not an interception worth warning about.
+        QuirkEffect::Consumed { action } => {
+            let is_paste_delegation =
+                action == "paste_from_clipboard" || action.starts_with("paste_from_clipboard:");
+            !(is_paste_delegation && trigger_action == EditorAction::EditPaste)
+        }
+        QuirkEffect::Translated { events, .. } => {
+            events.is_empty() || resolved_action(resolver, events, context) != Some(trigger_action)
+        }
+    };
+    intercepted.then_some(trigger_action)
 }
 
 /// Resolves a key sequence to a bound action, treating anything short of an
@@ -2286,6 +2357,64 @@ mod tests {
         assert!(
             super::ghostty_intercept_report(&[], &resolver).is_empty(),
             "no quirks, no report"
+        );
+    }
+
+    /// `disable_chords` (keymap verify mismatch) pulls the binding out of the
+    /// resolver but keeps it for the palette, and a quirk-intercepted chord
+    /// marks its live binding undelivered — the two data sources behind the
+    /// dim + `✗ undelivered` display (TASK-260820).
+    #[test]
+    fn palette_items_mark_verify_disabled_and_quirk_intercepted_bindings() {
+        use crate::keymap::{Binding, Source, parse_key_sequence};
+
+        let user = vec![
+            Binding::new(
+                parse_key_sequence("ctrl+alt+y").unwrap(),
+                EditorAction::EditUndo,
+                None,
+                Source::User,
+            ),
+            Binding::new(
+                parse_key_sequence("cmd+q").unwrap(),
+                EditorAction::AppQuit,
+                None,
+                Source::User,
+            ),
+        ];
+        let mut event_loop =
+            EventLoop::open_many(Vec::new(), Vec::new(), user, ThemeChoice::Dark).unwrap();
+        event_loop.ghostty_quirks = parse_ghostty_keybinds("keybind = super+q=quit\n");
+
+        event_loop.disable_chords(&parse_key_sequence("ctrl+alt+y").unwrap());
+        assert_eq!(
+            event_loop.disabled_bindings.len(),
+            1,
+            "the removed binding is retained for display"
+        );
+
+        let items = event_loop.palette_items();
+        let find = |name: &str| {
+            items
+                .iter()
+                .find(|item| item.action.as_str() == name)
+                .unwrap()
+        };
+
+        let quit = find("app.quit");
+        assert!(
+            quit.undelivered,
+            "quirk-intercepted cmd+q is marked: {quit:?}"
+        );
+
+        // edit.undo still has its live default binding; the verify-disabled
+        // user chord must not taint it, but must stay visible as lost.
+        let undo = find("edit.undo");
+        assert!(!undo.undelivered, "live default stays normal: {undo:?}");
+        assert_eq!(
+            undo.lost.as_deref(),
+            Some("Ctrl+Alt+Y"),
+            "the removed user key stays visible: {undo:?}"
         );
     }
 

@@ -10,6 +10,15 @@ use crate::{
 pub struct PaletteItem {
     pub action: EditorAction,
     pub binding: Option<String>,
+    /// The shown binding cannot arrive in this terminal (quirk-intercepted
+    /// chord, or the binding was disabled by `keymap verify`). The action
+    /// itself still runs from the palette; only the key column is dimmed.
+    pub undelivered: bool,
+    /// A verify-disabled binding that lost to a live one on the same action
+    /// (e.g. an imported Cmd chord removed while the default still works).
+    /// Shown as a dim note so the user's muscle-memory key never vanishes
+    /// silently.
+    pub lost: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -66,16 +75,47 @@ impl CommandPalette {
     }
 }
 
-pub fn filter_actions(query: &str, bindings: &[Binding]) -> Vec<PaletteItem> {
+/// `disabled_bindings` are the bindings `keymap verify` measured as
+/// undeliverable and removed from the resolver. `blocked_chords` are every
+/// quirk-intercepted trigger (checked against each chord of a sequence);
+/// `harmless_single_chords` exempts single-chord bindings whose interception
+/// still produces the bound behavior (e.g. Cmd+V arriving as a paste). All
+/// surface as dim + `✗ undelivered` so a missing key never vanishes silently
+/// (SPEC-0003).
+pub fn filter_actions(
+    query: &str,
+    bindings: &[Binding],
+    disabled_bindings: &[Binding],
+    blocked_chords: &[KeyEvent],
+    harmless_single_chords: &[KeyEvent],
+) -> Vec<PaletteItem> {
     let needle = query.to_ascii_lowercase();
     EditorAction::ALL
         .iter()
         .copied()
         .filter(|action| action.as_str().to_ascii_lowercase().contains(&needle))
-        .map(|action| PaletteItem {
-            action,
-            binding: best_binding_for(action, bindings)
-                .map(|binding| format_key_sequence(&binding.keys)),
+        .map(|action| {
+            // A live binding wins the key column; a verify-disabled one then
+            // rides along as the `lost` note. With no live binding the
+            // disabled one takes the column itself (as a dimmed explanation,
+            // not a working shortcut).
+            let live = best_binding_for(action, bindings);
+            let disabled = best_binding_for(action, disabled_bindings);
+            let (binding, undelivered, lost) = match live {
+                Some(live) => {
+                    let blocked = live.keys.iter().any(|key| blocked_chords.contains(key))
+                        && !(live.keys.len() == 1
+                            && harmless_single_chords.contains(&live.keys[0]));
+                    (Some(live), blocked, disabled)
+                }
+                None => (disabled, disabled.is_some(), None),
+            };
+            PaletteItem {
+                action,
+                binding: binding.map(|binding| format_key_sequence(&binding.keys)),
+                undelivered,
+                lost: lost.map(|binding| format_key_sequence(&binding.keys)),
+            }
         })
         .collect()
 }
@@ -139,16 +179,39 @@ pub fn draw_palette(screen: &mut Screen, palette: &CommandPalette, items: &[Pale
 
     let offset = scroll_offset(palette.selected, items.len(), max_items);
     for (row, item) in items.iter().skip(offset).take(max_items).enumerate() {
-        let label = match &item.binding {
-            Some(binding) => format!("{:<32}{}", item.action.as_str(), binding),
-            None => item.action.as_str().to_string(),
+        // `head` draws in the row style; `tail` (an undeliverable key column,
+        // or the lost-binding note) is dimmed. The action name itself never
+        // dims — it still runs from the palette; it is the key that this
+        // terminal will not deliver.
+        let (head, tail) = match (&item.binding, &item.lost) {
+            (Some(binding), _) if item.undelivered => (
+                format!("{:<32}", item.action.as_str()),
+                format!("{binding}  ✗ undelivered"),
+            ),
+            (Some(binding), Some(lost)) => (
+                format!("{:<32}{binding}", item.action.as_str()),
+                format!("  ✗ {lost} undelivered"),
+            ),
+            (Some(binding), None) => (
+                format!("{:<32}{binding}", item.action.as_str()),
+                String::new(),
+            ),
+            (None, _) => (item.action.as_str().to_string(), String::new()),
         };
-        let clipped = clip_to_width(&label, inner_width);
+        let clipped = clip_to_width(&format!("{head}{tail}"), inner_width);
         let is_selected = offset + row == palette.selected;
         let style = if is_selected { reverse } else { normal };
-        // Pad the selected row to full width so the highlight forms a bar.
+        // Pad the selected row to full width so the highlight forms a bar
+        // (selection keeps the full reverse bar for visibility, so the dim
+        // overdraw below skips selected rows).
         let padded = format!("{:<width$}", clipped, width = inner_width);
-        screen.put_str(box_x + 2, box_top + 2 + row as u16, &padded, style);
+        let y = box_top + 2 + row as u16;
+        screen.put_str(box_x + 2, y, &padded, style);
+        let dim_from = head.chars().count();
+        if !tail.is_empty() && !is_selected && dim_from < inner_width {
+            let dim_tail: String = padded.chars().skip(dim_from).collect();
+            screen.put_str(box_x + 2 + dim_from as u16, y, &dim_tail, dim);
+        }
     }
 }
 
@@ -214,17 +277,82 @@ mod tests {
 
     #[test]
     fn palette_filter_matches_case_insensitive_substrings() {
-        let lower = filter_actions("sav", &[])
+        let lower = filter_actions("sav", &[], &[], &[], &[])
             .into_iter()
             .map(|item| item.action.as_str())
             .collect::<Vec<_>>();
         assert!(lower.contains(&"file.save"));
         assert!(lower.contains(&"file.saveAs"));
 
-        let upper = filter_actions("SAV", &[])
+        let upper = filter_actions("SAV", &[], &[], &[], &[])
             .into_iter()
             .map(|item| item.action.as_str())
             .collect::<Vec<_>>();
         assert_eq!(lower, upper);
+    }
+
+    #[test]
+    fn palette_marks_undelivered_bindings_from_both_sources() {
+        use crate::keymap::{Binding, EditorAction, Source, parse_key_sequence};
+
+        let binding = |keys: &str, action| Binding {
+            keys: parse_key_sequence(keys).unwrap(),
+            action,
+            when: None,
+            source: Source::User,
+        };
+        // alt chords keep the expected labels platform-independent (Super
+        // renders as "Cmd" on macOS and "Super" elsewhere).
+        let live = [
+            binding("ctrl+s", EditorAction::FileSave),
+            binding("alt+z", EditorAction::EditUndo),
+            binding("ctrl+k alt+x", EditorAction::EditRedo),
+            binding("alt+v", EditorAction::EditPaste),
+        ];
+        let disabled = [
+            binding("alt+c", EditorAction::EditCopy),
+            binding("alt+s", EditorAction::FileSave),
+        ];
+        let blocked = parse_key_sequence("alt+z alt+x alt+v").unwrap();
+        let harmless = parse_key_sequence("alt+v").unwrap();
+
+        let items = filter_actions("", &live, &disabled, &blocked, &harmless);
+        let find = |name: &str| items.iter().find(|i| i.action.as_str() == name).unwrap();
+
+        let save = find("file.save");
+        assert_eq!(save.binding.as_deref(), Some("Ctrl+S"));
+        assert!(!save.undelivered, "deliverable binding stays normal");
+        assert_eq!(
+            save.lost.as_deref(),
+            Some("Alt+S"),
+            "a verify-disabled key rides along even when a live one exists"
+        );
+
+        let undo = find("edit.undo");
+        assert!(undo.undelivered, "quirk-intercepted chord is marked");
+
+        let redo = find("edit.redo");
+        assert!(
+            redo.undelivered,
+            "a blocked chord inside a sequence marks the whole binding"
+        );
+
+        let paste = find("edit.paste");
+        assert!(
+            !paste.undelivered,
+            "harmless single-chord interception is exempt"
+        );
+
+        let copy = find("edit.copy");
+        assert_eq!(
+            copy.binding.as_deref(),
+            Some("Alt+C"),
+            "verify-disabled binding still shows instead of vanishing"
+        );
+        assert!(copy.undelivered);
+
+        let quit = find("app.quit");
+        assert_eq!(quit.binding, None);
+        assert!(!quit.undelivered, "unbound action carries no mark");
     }
 }

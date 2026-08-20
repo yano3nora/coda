@@ -102,9 +102,11 @@ VS Code の `keybindings.json`(JSONC)を読み込む。
 | VS Code command                          | Internal action           |
 | ---------------------------------------- | ------------------------- |
 | `workbench.action.files.newUntitledFile` | `buffer.new`              |
-| `workbench.action.splitEditor`           | `view.splitVertical`      |
-| `workbench.action.focusNextGroup`        | `view.focusNextSplit`     |
-| `workbench.action.focusPreviousGroup`    | `view.focusPreviousSplit` |
+
+split 系 (`workbench.action.splitEditor` / `focusNextGroup` / `focusPreviousGroup`)
+は当初対応表にあったが、split view 自体を coda の責務範囲外と判断したため
+対応表から削除した。`workbench.*` のため `Ignored: outside editor scope` に
+分類される (TASK-260820)。
 
 ### Explicitly ignored commands
 

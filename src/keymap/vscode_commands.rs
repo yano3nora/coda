@@ -48,9 +48,6 @@ pub fn action_for_vscode_command(command: &str) -> Option<EditorAction> {
         "workbench.action.files.newUntitledFile" => EditorAction::BufferNew,
         "workbench.action.files.save" => EditorAction::FileSave,
         "workbench.action.files.saveAs" => EditorAction::FileSaveAs,
-        "workbench.action.splitEditor" => EditorAction::ViewSplitVertical,
-        "workbench.action.focusNextGroup" => EditorAction::ViewFocusNextSplit,
-        "workbench.action.focusPreviousGroup" => EditorAction::ViewFocusPreviousSplit,
         "editor.action.toggleWordWrap" => EditorAction::ViewToggleWrap,
         _ => return None,
     };

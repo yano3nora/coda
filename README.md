@@ -5,6 +5,9 @@ coda
 
 > Not a Vim alternative, nor a terminal port of VS Code. A plain text editor you can bring your own keymap to.
 
+> [!NOTE]
+> Currently only **VS Code `keybindings.json`** import is supported. Other editors (JetBrains, Sublime, ...) are not supported yet.
+
 ## Features
 
 - **Imports VS Code `keybindings.json`**, with an import report that classifies each binding as imported / ignored / unsupported / conflict / disabled. `--cmd=keep|ctrl|both` selects how Cmd-key bindings are brought in
