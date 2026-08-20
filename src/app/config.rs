@@ -287,8 +287,8 @@ capability_warning = true  # startup warning when the terminal cannot distinguis
 /// are coda's internal action names (SPEC-0004 conversion table), not VS
 /// Code command IDs.
 pub(crate) const KEYBINDINGS_TEMPLATE: &str = "\
-// User key bindings (docs/SPEC-0005-cli-and-config.md). JSONC: comments are
-// allowed. `command` is coda's internal action name, e.g. \"cursor.down\" —
+// User key bindings (docs/SPEC-0005-cli-and-config.md). JSONC: comments and
+// trailing commas are allowed. `command` is coda's internal action name, e.g. \"cursor.down\" —
 // run the command palette (F1) to see every available action.
 [
   // { \"key\": \"ctrl+j\", \"command\": \"cursor.down\", \"when\": \"editorFocus\" }

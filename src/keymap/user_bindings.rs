@@ -57,7 +57,7 @@ pub fn load_bindings_with_source(
     text: &str,
     source: Source,
 ) -> Result<UserBindingsLoad, UserBindingsError> {
-    let stripped = strip_jsonc_comments(text);
+    let stripped = strip_trailing_commas(&strip_jsonc_comments(text));
     let value: Value = serde_json::from_str(&stripped)
         .map_err(|error| UserBindingsError::InvalidJson(error.to_string()))?;
     let entries = value.as_array().ok_or(UserBindingsError::RootNotArray)?;
@@ -216,6 +216,48 @@ pub(crate) fn strip_jsonc_comments(text: &str) -> String {
     output
 }
 
+/// Blanks out trailing commas before `]`/`}` (VS Code's keybindings.json
+/// accepts them; serde_json does not). Expects comment-stripped input, so
+/// between a trailing comma and its closing bracket only whitespace remains
+/// and string literals are the only region to protect. Replaces with a space
+/// instead of deleting to keep serde_json error positions accurate, matching
+/// [`strip_jsonc_comments`].
+pub(crate) fn strip_trailing_commas(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, character) in text.char_indices() {
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => {
+                in_string = true;
+                output.push(character);
+            }
+            ',' if matches!(
+                text[index + 1..].trim_start().chars().next(),
+                Some(']') | Some('}')
+            ) =>
+            {
+                output.push(' ');
+            }
+            _ => output.push(character),
+        }
+    }
+
+    output
+}
+
 impl fmt::Display for UserBindingsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -262,7 +304,10 @@ impl fmt::Display for BindingIssueReason {
 
 #[cfg(test)]
 mod tests {
-    use super::{BindingIssueReason, UserBindingsError, load_user_bindings, strip_jsonc_comments};
+    use super::{
+        BindingIssueReason, UserBindingsError, load_user_bindings, strip_jsonc_comments,
+        strip_trailing_commas,
+    };
     use crate::{
         input::{Key, KeyEvent, Modifiers},
         keymap::{EditorAction, Source},
@@ -315,6 +360,57 @@ mod tests {
 
         assert!(loaded.issues.is_empty());
         assert_eq!(loaded.bindings.len(), 2);
+    }
+
+    #[test]
+    fn accepts_trailing_commas_like_vscode() {
+        // VS Code's keybindings.json accepts trailing commas, and users paste
+        // entries from it verbatim — rejecting the whole file over one comma
+        // violates the "do not silently break" spirit for a habit VS Code
+        // itself allows.
+        let loaded = load_user_bindings(
+            r#"[
+                { "key": "ctrl+f", "command": "search.open", },
+                { "key": "ctrl+k", "command": "cursor.up" }, // trailing after last entry
+            ]"#,
+        )
+        .unwrap();
+
+        assert!(loaded.issues.is_empty());
+        assert_eq!(loaded.bindings.len(), 2);
+        assert_eq!(loaded.bindings[0].action, EditorAction::SearchOpen);
+    }
+
+    #[test]
+    fn trailing_comma_stripper_handles_escapes_and_multibyte() {
+        // Exercises the string-state machine directly on the branches that
+        // matter for safety: escaped quotes must not end string state, an
+        // escaped backslash before a closing quote must, and multibyte chars
+        // ahead of a comma must not panic the byte-index lookahead.
+        let cases = [
+            (r#"[{"key": "a\",]b"},]"#, r#"[{"key": "a\",]b"} ]"#),
+            (r#"["a\\",]"#, r#"["a\\" ]"#),
+            ("[\"日本語🎌\",]", "[\"日本語🎌\" ]"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(strip_trailing_commas(input), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn comma_before_bracket_inside_string_is_not_stripped() {
+        let loaded = load_user_bindings(
+            r#"[{ "key": "ctrl+j", "command": "cursor.down", "when": "looks,]like,}json" }]"#,
+        )
+        .unwrap();
+
+        // The when clause is invalid, but it must reach the when-parser
+        // intact — proving the comma stripper did not touch string contents.
+        assert_eq!(loaded.issues.len(), 1);
+        assert!(matches!(
+            loaded.issues[0].reason,
+            BindingIssueReason::InvalidWhen(_)
+        ));
     }
 
     #[test]
