@@ -265,9 +265,10 @@ const COMMON: &[RawBinding] = &[
         Some("textInputFocus"),
         Source::Default,
     ),
-    // Tab/Shift+Tab (TASK-260711-19): selection-less Tab keeps inserting a
-    // literal tab character, handled directly by the event loop's text-input
-    // path rather than through a binding — so it deliberately has no default
+    // Tab/Shift+Tab (TASK-260711-19): selection-less Tab inserts one indent
+    // unit (`[editor] indent_style`, TASK-260828), handled directly by the
+    // event loop's text-input path rather than through a binding — so it
+    // deliberately has no default
     // entry here. Shift+Tab always outdents regardless of selection (VS Code
     // parity); CSI Z decodes to this same Tab+Shift chord (see
     // `input::decoder`), so nothing extra is needed to support the

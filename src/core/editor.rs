@@ -8,10 +8,55 @@ use super::{
     undo::{EditGroup, EditKind, EditOp, MergeInfo, UndoStack},
 };
 
-/// Fixed indent width for `indent`/`outdent` (TASK-260711-19 scope decision:
-/// no per-buffer/tab-vs-space config yet — that is future work).
-const INDENT_WIDTH: isize = 4;
-const INDENT_STR: &str = "    ";
+/// What one indent level is made of: `[editor] indent_style` (TASK-260828).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum IndentStyle {
+    Space,
+    Tab,
+}
+
+/// Indent unit shared by `indent`/`outdent` and the event loop's Tab
+/// insertion. `width` is the space count per level; outdent also uses it as
+/// the cap when stripping leading spaces, regardless of style, so mixed
+/// tab/space blocks degrade one level per line either way.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct IndentConfig {
+    pub style: IndentStyle,
+    pub width: usize,
+}
+
+impl Default for IndentConfig {
+    fn default() -> Self {
+        Self {
+            style: IndentStyle::Space,
+            width: 4,
+        }
+    }
+}
+
+impl IndentConfig {
+    /// Upper bound for `width`, shared by config parsing and the
+    /// `editor.setIndentWidth` prompt. Every Tab press allocates
+    /// `" ".repeat(width)` under the space style, so an unbounded value is a
+    /// configuration mistake, not a feature.
+    pub const MAX_WIDTH: usize = 16;
+
+    /// Text inserted for one indent level.
+    pub fn unit_text(&self) -> String {
+        match self.style {
+            IndentStyle::Tab => "\t".to_string(),
+            IndentStyle::Space => " ".repeat(self.width),
+        }
+    }
+
+    /// Grapheme count of one indent level (for cursor shifting).
+    fn unit_len(&self) -> usize {
+        match self.style {
+            IndentStyle::Tab => 1,
+            IndentStyle::Space => self.width,
+        }
+    }
+}
 
 /// Cursor movement commands exposed by [`EditorCore::move_cursor`].
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -347,26 +392,28 @@ impl EditorCore {
     }
 
     /// Indents the current line, or every line touched by the selection, by
-    /// [`INDENT_WIDTH`] spaces. Mirrors `move_lines_up`/`move_lines_down`:
+    /// one [`IndentConfig`] unit. Mirrors `move_lines_up`/`move_lines_down`:
     /// the whole block is one undo group (TASK-260711-19).
-    pub fn indent(&mut self) {
-        self.apply_line_indent(|line| (format!("{INDENT_STR}{line}"), INDENT_WIDTH));
+    pub fn indent(&mut self, indent: IndentConfig) {
+        let unit = indent.unit_text();
+        let delta = indent.unit_len() as isize;
+        self.apply_line_indent(|line| (format!("{unit}{line}"), delta));
     }
 
     /// Outdents (removes one indent level from) the current line, or every
     /// line touched by the selection. Each line loses a single leading tab,
-    /// or up to [`INDENT_WIDTH`] leading spaces — whichever is actually
-    /// present — so a block with mixed tab/space indentation degrades one
-    /// level per line instead of requiring uniform indentation
+    /// or up to [`IndentConfig::width`] leading spaces — whichever is
+    /// actually present — so a block with mixed tab/space indentation
+    /// degrades one level per line instead of requiring uniform indentation
     /// (TASK-260711-19).
-    pub fn outdent(&mut self) {
+    pub fn outdent(&mut self, indent: IndentConfig) {
         self.apply_line_indent(|line| {
             if let Some(rest) = line.strip_prefix('\t') {
                 (rest.to_string(), -1)
             } else {
                 let removable = line
                     .chars()
-                    .take(INDENT_WIDTH as usize)
+                    .take(indent.width)
                     .take_while(|character| *character == ' ')
                     .count();
                 (
@@ -1134,6 +1181,8 @@ mod tests {
             IndentMultiLineSelection,
             OutdentNoLeadingWhitespaceIsNoop,
             OutdentMixedTabsAndSpaces,
+            IndentTabStyle,
+            OutdentNarrowWidth,
         }
 
         let cases = [
@@ -1149,6 +1198,8 @@ mod tests {
                 "outdent mixed tabs and spaces",
                 Case::OutdentMixedTabsAndSpaces,
             ),
+            ("indent with tab style", Case::IndentTabStyle),
+            ("outdent with narrow width", Case::OutdentNarrowWidth),
         ];
 
         for (name, case) in cases {
@@ -1159,7 +1210,7 @@ mod tests {
                     editor.selection = Some(selection_before);
                     editor.cursor = Position::new(1, 3);
 
-                    editor.indent();
+                    editor.indent(IndentConfig::default());
 
                     assert_eq!(text(&editor), "    foo\n    bar\nbaz", "case {name}");
                     assert_eq!(editor.cursor, Position::new(1, 7), "case {name}");
@@ -1178,7 +1229,7 @@ mod tests {
                     let mut editor = editor("foo\nbar");
                     editor.cursor = Position::new(0, 1);
 
-                    editor.outdent();
+                    editor.outdent(IndentConfig::default());
 
                     assert_eq!(text(&editor), "foo\nbar", "case {name}");
                     assert!(
@@ -1192,7 +1243,7 @@ mod tests {
                     editor.selection = Some(selection_before);
                     editor.cursor = Position::new(2, 7);
 
-                    editor.outdent();
+                    editor.outdent(IndentConfig::default());
 
                     // One leading tab, two of four leading spaces, and a full
                     // four leading spaces are each removed as a single level
@@ -1209,6 +1260,31 @@ mod tests {
                     assert_eq!(text(&editor), "\tfoo\n  bar\n    baz", "case {name}");
                     assert_eq!(editor.cursor, Position::new(2, 7), "case {name}");
                     assert_eq!(editor.selection, Some(selection_before), "case {name}");
+                }
+                Case::IndentTabStyle => {
+                    let mut editor = editor("foo\nbar");
+                    editor.cursor = Position::new(0, 2);
+
+                    editor.indent(IndentConfig {
+                        style: IndentStyle::Tab,
+                        width: 4,
+                    });
+
+                    assert_eq!(text(&editor), "\tfoo\nbar", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(0, 3), "case {name}");
+                }
+                Case::OutdentNarrowWidth => {
+                    // width caps how many leading spaces one outdent removes.
+                    let mut editor = editor("    foo");
+                    editor.cursor = Position::new(0, 6);
+
+                    editor.outdent(IndentConfig {
+                        style: IndentStyle::Space,
+                        width: 2,
+                    });
+
+                    assert_eq!(text(&editor), "  foo", "case {name}");
+                    assert_eq!(editor.cursor, Position::new(0, 4), "case {name}");
                 }
             }
         }

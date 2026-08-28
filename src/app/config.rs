@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    core::editor::{IndentConfig, IndentStyle},
     highlight::ThemeChoice,
     keymap::{Binding, Source, load_bindings_with_source, load_user_bindings, parse_key_chord},
 };
@@ -26,6 +27,9 @@ pub struct AppConfig {
     /// Startup default for visual line wrap (`[editor] wrap`,
     /// TASK-260711-18). `view.toggleWrap` flips it at runtime.
     pub wrap: bool,
+    /// `[editor] indent_style` / `indent_width` (TASK-260828): unit used by
+    /// Tab insertion and `edit.indent`/`edit.outdent`.
+    pub indent: IndentConfig,
     /// `[keymap] sequence_timeout_ms`: how long a pending key sequence waits
     /// for its next chord before the exact match (if any) fires (SPEC-0002).
     pub sequence_timeout_ms: u64,
@@ -51,6 +55,7 @@ impl Default for AppConfig {
             warnings: Vec::new(),
             theme: ThemeChoice::Dark,
             wrap: false,
+            indent: IndentConfig::default(),
             sequence_timeout_ms: DEFAULT_SEQUENCE_TIMEOUT_MS,
             palette_key: None,
             capability_warning: true,
@@ -141,12 +146,49 @@ fn load_config_toml(path: &Path, warnings: &mut Vec<String>) -> AppConfig {
         });
     }
 
-    match value.get("editor").and_then(|editor| editor.get("wrap")) {
+    let editor = value.get("editor");
+
+    match editor.and_then(|editor| editor.get("wrap")) {
         Some(toml::Value::Boolean(wrap)) => config.wrap = *wrap,
         Some(other) => {
             warnings.push(format!(
                 "{}: editor.wrap must be true or false, got {other}; using wrap = false",
                 path.display()
+            ));
+        }
+        None => {}
+    }
+
+    match editor.and_then(|editor| editor.get("indent_style")) {
+        Some(toml::Value::String(style)) if style == "space" => {
+            config.indent.style = IndentStyle::Space;
+        }
+        Some(toml::Value::String(style)) if style == "tab" => {
+            config.indent.style = IndentStyle::Tab;
+        }
+        Some(other) => {
+            warnings.push(format!(
+                "{}: editor.indent_style must be \"space\" or \"tab\", got {other}; using space",
+                path.display()
+            ));
+        }
+        None => {}
+    }
+
+    match editor.and_then(|editor| editor.get("indent_width")) {
+        // Zero would turn indent/outdent and Tab insertion into no-ops under
+        // the space style; the upper bound is IndentConfig::MAX_WIDTH (see
+        // its doc). Out-of-range values are configuration mistakes.
+        Some(toml::Value::Integer(width))
+            if (1..=IndentConfig::MAX_WIDTH as i64).contains(width) =>
+        {
+            config.indent.width = *width as usize;
+        }
+        Some(other) => {
+            warnings.push(format!(
+                "{}: editor.indent_width must be an integer between 1 and {}, got {other}; using 4",
+                path.display(),
+                IndentConfig::MAX_WIDTH
             ));
         }
         None => {}
@@ -271,7 +313,9 @@ pub(crate) const SETTINGS_TEMPLATE: &str = "\
 theme = \"dark\"  # \"dark\" | \"light\"
 
 [editor]
-wrap = false  # visual line wrap; toggle at runtime with view.toggleWrap (alt+z)
+wrap = false            # visual line wrap; toggle at runtime with view.toggleWrap (alt+z)
+indent_style = \"space\"  # \"space\" | \"tab\"; what Tab / edit.indent inserts
+indent_width = 4        # spaces per indent level, 1-16 (also caps space removal on outdent)
 
 [keymap]
 sequence_timeout_ms = 800     # pending key sequence wait before the exact match fires
@@ -459,6 +503,57 @@ mod tests {
         assert!(!loaded.wrap);
         assert_eq!(loaded.warnings.len(), 1);
         assert!(loaded.warnings[0].contains("editor.wrap"));
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// TASK-260828: `[editor] indent_style` / `indent_width`. Valid values
+    /// load, invalid ones warn and fall back to space/4 without breaking
+    /// startup.
+    #[test]
+    fn load_reads_indent_options_and_rejects_invalid_values() {
+        use crate::core::editor::{IndentConfig, IndentStyle};
+
+        let temp = temp_config_dir("indent");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("config.toml"),
+            "[editor]\nindent_style = \"tab\"\nindent_width = 2\n",
+        )
+        .unwrap();
+        let loaded = load_from_base_dir(&temp);
+        assert_eq!(
+            loaded.indent,
+            IndentConfig {
+                style: IndentStyle::Tab,
+                width: 2
+            }
+        );
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+        // Upper boundary of the accepted range.
+        fs::write(temp.join("config.toml"), "[editor]\nindent_width = 16\n").unwrap();
+        let loaded = load_from_base_dir(&temp);
+        assert_eq!(loaded.indent.width, 16);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+        let invalid_cases: &[(&str, &str)] = &[
+            ("[editor]\nindent_style = \"tabs\"\n", "indent_style"),
+            ("[editor]\nindent_style = 4\n", "indent_style"),
+            ("[editor]\nindent_width = 0\n", "indent_width"),
+            ("[editor]\nindent_width = 17\n", "indent_width"),
+            ("[editor]\nindent_width = \"four\"\n", "indent_width"),
+        ];
+        for (toml, expected_in_warning) in invalid_cases {
+            fs::write(temp.join("config.toml"), toml).unwrap();
+            let loaded = load_from_base_dir(&temp);
+            assert_eq!(loaded.indent, IndentConfig::default(), "{toml}");
+            assert_eq!(loaded.warnings.len(), 1, "{toml}: {:?}", loaded.warnings);
+            assert!(
+                loaded.warnings[0].contains(expected_in_warning),
+                "{toml}: {:?}",
+                loaded.warnings
+            );
+        }
         fs::remove_dir_all(&temp).unwrap();
     }
 

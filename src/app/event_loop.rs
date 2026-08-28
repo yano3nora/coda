@@ -10,7 +10,7 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    core::editor::{EditorCore, Motion},
+    core::editor::{EditorCore, IndentConfig, IndentStyle, Motion},
     core::position::Position,
     highlight::{HighlightEngine, ThemeChoice},
     input::{
@@ -161,6 +161,9 @@ pub struct EventLoop {
     /// per-document: `view.toggleWrap` and the `[editor] wrap` config apply
     /// to every buffer, mirroring how VS Code's setting behaves in practice.
     wrap: bool,
+    /// `[editor] indent_style` / `indent_width` (TASK-260828): unit used by
+    /// `edit.indent`/`edit.outdent` and the Tab literal-insertion path.
+    indent: IndentConfig,
     /// `[keymap] sequence_timeout_ms` (SPEC-0005): pending-sequence wait
     /// before the exact match fires.
     sequence_timeout: Duration,
@@ -265,6 +268,7 @@ impl EventLoop {
             capability_probe: None,
             capability_detection: None,
             wrap: false,
+            indent: IndentConfig::default(),
             sequence_timeout: DEFAULT_SEQUENCE_TIMEOUT,
             capability_warning: true,
             screen_size: (80, 24),
@@ -425,6 +429,12 @@ impl EventLoop {
     /// (TASK-260711-18); `view.toggleWrap` flips it at runtime.
     pub(crate) fn set_wrap(&mut self, wrap: bool) {
         self.wrap = wrap;
+    }
+
+    /// Applies `[editor] indent_style` / `indent_width` from config.toml
+    /// (TASK-260828).
+    pub(crate) fn set_indent(&mut self, indent: IndentConfig) {
+        self.indent = indent;
     }
 
     /// CLI `+N` startup jump (TASK-260729): applies to the first (= active)
@@ -1133,7 +1143,8 @@ impl EventLoop {
                 if self.block_if_readonly() {
                     return QuitDecision::Continue;
                 }
-                self.editor_mut().insert_text("\t");
+                let unit = self.indent.unit_text();
+                self.editor_mut().insert_text(&unit);
                 self.quit_guard.reset();
                 self.close_guard.reset();
             }
@@ -1227,8 +1238,14 @@ impl EventLoop {
             EditorAction::EditInsertLineBefore => self.editor_mut().insert_line_before(),
             EditorAction::EditMoveLinesUp => self.editor_mut().move_lines_up(),
             EditorAction::EditMoveLinesDown => self.editor_mut().move_lines_down(),
-            EditorAction::EditIndent => self.editor_mut().indent(),
-            EditorAction::EditOutdent => self.editor_mut().outdent(),
+            EditorAction::EditIndent => {
+                let indent = self.indent;
+                self.editor_mut().indent(indent);
+            }
+            EditorAction::EditOutdent => {
+                let indent = self.indent;
+                self.editor_mut().outdent(indent);
+            }
             EditorAction::EditCopy => {
                 if let Some(text) = self.editor_mut().copy_text() {
                     self.copy_to_clipboards(text, "copied");
@@ -1307,6 +1324,31 @@ impl EventLoop {
                 } else {
                     "wrap: off".to_string()
                 };
+            }
+            // Runtime-only, like view.toggleWrap: neither indent command
+            // writes back to config.toml — the next launch reloads the
+            // configured (or default) unit.
+            EditorAction::EditorToggleIndentStyle => {
+                self.indent.style = match self.indent.style {
+                    IndentStyle::Space => IndentStyle::Tab,
+                    IndentStyle::Tab => IndentStyle::Space,
+                };
+                self.message = match self.indent.style {
+                    IndentStyle::Tab => "indent: tab".to_string(),
+                    IndentStyle::Space => format!("indent: space (width {})", self.indent.width),
+                };
+            }
+            EditorAction::EditorSetIndentWidth => {
+                self.palette.close();
+                self.prompt.open(
+                    PromptPurpose::IndentWidth,
+                    format!(
+                        "Indent Width (1-{}, now {}):",
+                        IndentConfig::MAX_WIDTH,
+                        self.indent.width
+                    ),
+                    "",
+                );
             }
             EditorAction::ConfigOpenSettings => {
                 self.open_config_document(config::settings_path(), config::SETTINGS_TEMPLATE)
@@ -1468,15 +1510,20 @@ impl EventLoop {
         match self.prompt.handle_key(event) {
             PromptOutcome::Continue => QuitDecision::Continue,
             PromptOutcome::Cancel => {
+                self.message = match self.prompt.purpose {
+                    Some(PromptPurpose::SaveAs) => "save as: cancelled".to_string(),
+                    Some(PromptPurpose::GoToLine) => "go to line: cancelled".to_string(),
+                    Some(PromptPurpose::IndentWidth) => "indent width: cancelled".to_string(),
+                    None => "cancelled".to_string(),
+                };
                 self.prompt.close();
-                self.message = "save as: cancelled".to_string();
                 QuitDecision::Continue
             }
             PromptOutcome::Submit => self.submit_prompt(),
         }
     }
 
-    /// Routes a submitted prompt to its purpose. Only `SaveAs` exists today.
+    /// Routes a submitted prompt to its purpose.
     fn submit_prompt(&mut self) -> QuitDecision {
         let Some(purpose) = self.prompt.purpose else {
             self.prompt.close();
@@ -1501,6 +1548,22 @@ impl EventLoop {
                         };
                     }
                     _ => self.message = "line number must be a positive integer".to_string(),
+                }
+                QuitDecision::Continue
+            }
+            PromptPurpose::IndentWidth => {
+                match input.parse::<usize>() {
+                    Ok(width) if (1..=IndentConfig::MAX_WIDTH).contains(&width) => {
+                        self.indent.width = width;
+                        self.prompt.close();
+                        self.message = format!("indent width: {width}");
+                    }
+                    _ => {
+                        self.message = format!(
+                            "indent width must be an integer between 1 and {}",
+                            IndentConfig::MAX_WIDTH
+                        );
+                    }
                 }
                 QuitDecision::Continue
             }
@@ -2789,6 +2852,85 @@ mod tests {
 
         event_loop.dispatch(EditorAction::EditOutdent);
         assert_eq!(buffer_text(&event_loop), "foo\nbar");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// TASK-260828 testcase: `[editor] indent_style`/`indent_width` drive
+    /// both the selection-less Tab insertion and `edit.indent`. Default is
+    /// space×4; `set_indent` switches every path to the configured unit.
+    #[test]
+    fn set_indent_controls_tab_insertion_and_indent_unit() {
+        use crate::core::editor::{IndentConfig, IndentStyle};
+
+        let path = temp_path("indent-config");
+        std::fs::write(&path, b"foo").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        // Default: selection-less Tab inserts spaces, not a literal tab.
+        event_loop.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(buffer_text(&event_loop), "    foo");
+
+        event_loop.set_indent(IndentConfig {
+            style: IndentStyle::Tab,
+            width: 4,
+        });
+        event_loop.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(buffer_text(&event_loop), "    \tfoo");
+
+        // edit.indent prepends one unit at the line start.
+        event_loop.dispatch(EditorAction::EditIndent);
+        assert_eq!(buffer_text(&event_loop), "\t    \tfoo");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// TASK-260828 testcase: the palette's runtime indent commands.
+    /// `editor.toggleIndentStyle` flips the unit immediately;
+    /// `editor.setIndentWidth` prompts for a width, rejects out-of-range
+    /// input (prompt stays open), and applies a valid one. Neither persists
+    /// to config.toml (same runtime-only contract as `view.toggleWrap`).
+    #[test]
+    fn palette_indent_commands_change_the_runtime_unit() {
+        let path = temp_path("indent-palette");
+        std::fs::write(&path, b"foo").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        event_loop.dispatch(EditorAction::EditorToggleIndentStyle);
+        assert_eq!(event_loop.message, "indent: tab");
+        event_loop.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(buffer_text(&event_loop), "\tfoo");
+
+        event_loop.dispatch(EditorAction::EditorToggleIndentStyle);
+        assert_eq!(event_loop.message, "indent: space (width 4)");
+
+        event_loop.dispatch(EditorAction::EditorSetIndentWidth);
+        assert!(event_loop.prompt.visible);
+        event_loop.handle_key(KeyEvent::plain(Key::Char('9')));
+        event_loop.handle_key(KeyEvent::plain(Key::Char('9')));
+        event_loop.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(
+            event_loop.prompt.visible,
+            "out-of-range width keeps the prompt open"
+        );
+        assert!(event_loop.message.contains("between 1 and 16"));
+
+        event_loop.handle_key(KeyEvent::plain(Key::Backspace));
+        event_loop.handle_key(KeyEvent::plain(Key::Backspace));
+        event_loop.handle_key(KeyEvent::plain(Key::Char('2')));
+        event_loop.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(!event_loop.prompt.visible);
+        assert_eq!(event_loop.message, "indent width: 2");
+        event_loop.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(buffer_text(&event_loop), "\t  foo");
+
+        // Esc reports the cancelled purpose, not "save as" (Codex review).
+        event_loop.dispatch(EditorAction::EditorSetIndentWidth);
+        event_loop.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(!event_loop.prompt.visible);
+        assert_eq!(event_loop.message, "indent width: cancelled");
 
         let _ = std::fs::remove_file(path);
     }

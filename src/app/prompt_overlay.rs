@@ -13,13 +13,14 @@ use crate::{
     ui::{Screen, Style},
 };
 
-/// What the current prompt session will do with its submitted input. Only
-/// `SaveAs` exists today; the enum exists so future prompt use sites reuse
-/// this overlay instead of growing a new one (TASK-260712 Gate 1).
+/// What the current prompt session will do with its submitted input. The
+/// enum exists so every prompt use site reuses this overlay instead of
+/// growing a new one (TASK-260712 Gate 1).
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PromptPurpose {
     SaveAs,
     GoToLine,
+    IndentWidth,
 }
 
 /// Result of feeding one key to the overlay.

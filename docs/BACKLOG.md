@@ -13,4 +13,6 @@
 ## Backlogs
 - [ ] 他 editor profile import（Zed / Sublime / JetBrains）
 - [ ] (着手前に要検討) tree-sitter への highlighting engine 差し替え
+- [ ] .editorconfig の indent 設定読み込み。優先順位は palette の一時変更 > .editorconfig > config.toml。per-buffer 設定への拡張が前提になる (TASK-260828 参照)。SSH 先で他人のリポジトリを直すコア用途と相性が良い
+- [ ] whitespace 可視化 (tab `→` / space `·` を dim 表示、renderWhitespace 相当)。tab 展開は `app/editor_view.rs` の 4 箇所に集約済みなので中コスト見込み。toggle コマンドと選択範囲との style 干渉の検討が必要
 

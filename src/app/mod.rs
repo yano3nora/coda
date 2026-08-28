@@ -90,6 +90,7 @@ fn run_editor(paths: Vec<PathBuf>, line: Option<usize>) -> i32 {
     ) {
         Ok(mut loop_) => {
             loop_.set_wrap(loaded_config.wrap);
+            loop_.set_indent(loaded_config.indent);
             loop_.set_sequence_timeout(std::time::Duration::from_millis(
                 loaded_config.sequence_timeout_ms,
             ));
