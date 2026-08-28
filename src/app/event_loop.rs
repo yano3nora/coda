@@ -161,8 +161,10 @@ pub struct EventLoop {
     /// per-document: `view.toggleWrap` and the `[editor] wrap` config apply
     /// to every buffer, mirroring how VS Code's setting behaves in practice.
     wrap: bool,
-    /// `[editor] indent_style` / `indent_width` (TASK-260828): unit used by
-    /// `edit.indent`/`edit.outdent` and the Tab literal-insertion path.
+    /// `[editor] indent_style` / `indent_width` (TASK-260828): the
+    /// config.toml base layer of `effective_indent` — per-buffer
+    /// .editorconfig values and palette overrides sit on top of it
+    /// (TASK-260828-editorconfig-indent).
     indent: IndentConfig,
     /// Whitespace markers (TASK-260828 render-whitespace). Editor-wide like
     /// `wrap`: `view.toggleWhitespace` and `[editor] render_whitespace`
@@ -207,6 +209,9 @@ impl EventLoop {
         let mut documents = Vec::new();
         for path in dedupe_paths(paths) {
             let (document, load_info) = Document::open(path.clone())?;
+            if let Some(warning) = &load_info.editorconfig_warning {
+                warnings.push(format!("{}: {warning}", document.display_name()));
+            }
             if load_info.is_new {
                 warnings.push(format!("{}: new file", document.display_name()));
             }
@@ -440,6 +445,18 @@ impl EventLoop {
     /// (TASK-260828).
     pub(crate) fn set_indent(&mut self, indent: IndentConfig) {
         self.indent = indent;
+    }
+
+    /// Indent unit for the active buffer, layered per item: palette
+    /// override, then .editorconfig, then config.toml
+    /// (TASK-260828-editorconfig-indent). Every consumer (Tab insertion,
+    /// `edit.indent`/`edit.outdent`, the width prompt) goes through here so
+    /// the layering cannot drift.
+    fn effective_indent(&self) -> IndentConfig {
+        let document = self.active_document();
+        document
+            .indent_override
+            .apply_to(document.editorconfig_indent.apply_to(self.indent))
     }
 
     /// Applies the `[editor] render_whitespace` startup default from
@@ -1156,7 +1173,7 @@ impl EventLoop {
                 if self.block_if_readonly() {
                     return QuitDecision::Continue;
                 }
-                let unit = self.indent.unit_text();
+                let unit = self.effective_indent().unit_text();
                 self.editor_mut().insert_text(&unit);
                 self.quit_guard.reset();
                 self.close_guard.reset();
@@ -1252,11 +1269,11 @@ impl EventLoop {
             EditorAction::EditMoveLinesUp => self.editor_mut().move_lines_up(),
             EditorAction::EditMoveLinesDown => self.editor_mut().move_lines_down(),
             EditorAction::EditIndent => {
-                let indent = self.indent;
+                let indent = self.effective_indent();
                 self.editor_mut().indent(indent);
             }
             EditorAction::EditOutdent => {
-                let indent = self.indent;
+                let indent = self.effective_indent();
                 self.editor_mut().outdent(indent);
             }
             EditorAction::EditCopy => {
@@ -1350,15 +1367,19 @@ impl EventLoop {
             }
             // Runtime-only, like view.toggleWrap: neither indent command
             // writes back to config.toml — the next launch reloads the
-            // configured (or default) unit.
+            // configured (or default) unit. Buffer-local since the
+            // .editorconfig layer (TASK-260828-editorconfig-indent): flipping
+            // one buffer must not disturb another buffer's resolved unit.
             EditorAction::EditorToggleIndentStyle => {
-                self.indent.style = match self.indent.style {
+                let flipped = match self.effective_indent().style {
                     IndentStyle::Space => IndentStyle::Tab,
                     IndentStyle::Tab => IndentStyle::Space,
                 };
-                self.message = match self.indent.style {
+                self.active_document_mut().indent_override.style = Some(flipped);
+                let effective = self.effective_indent();
+                self.message = match effective.style {
                     IndentStyle::Tab => "indent: tab".to_string(),
-                    IndentStyle::Space => format!("indent: space (width {})", self.indent.width),
+                    IndentStyle::Space => format!("indent: space (width {})", effective.width),
                 };
             }
             EditorAction::EditorSetIndentWidth => {
@@ -1368,7 +1389,7 @@ impl EventLoop {
                     format!(
                         "Indent Width (1-{}, now {}):",
                         IndentConfig::MAX_WIDTH,
-                        self.indent.width
+                        self.effective_indent().width
                     ),
                     "",
                 );
@@ -1577,7 +1598,7 @@ impl EventLoop {
             PromptPurpose::IndentWidth => {
                 match input.parse::<usize>() {
                     Ok(width) if (1..=IndentConfig::MAX_WIDTH).contains(&width) => {
-                        self.indent.width = width;
+                        self.active_document_mut().indent_override.width = Some(width);
                         self.prompt.close();
                         self.message = format!("indent width: {width}");
                     }
@@ -1614,6 +1635,8 @@ impl EventLoop {
         self.prompt.close();
         let document = self.active_document_mut();
         document.path = Some(path);
+        // The new location may sit under a different .editorconfig chain.
+        let editorconfig_warning = document.apply_editorconfig();
         // A new target has no prior mtime on record, and the "file exists"
         // step above (when it applied) already served as the overwrite
         // confirmation, so this write always goes through regardless of
@@ -1626,6 +1649,12 @@ impl EventLoop {
                 self.close_guard.reset();
             }
             Err(error) => self.message = format!("save failed: {error}"),
+        }
+        // Appended on the failure path too: the document already points at
+        // the new location, so a dropped warning would never resurface
+        // (Codex review).
+        if let Some(warning) = editorconfig_warning {
+            self.message.push_str(&format!(" | {warning}"));
         }
         QuitDecision::Continue
     }
@@ -1712,6 +1741,9 @@ impl EventLoop {
                     let template = template.strip_suffix('\n').unwrap_or(template);
                     document.editor.insert_text(template);
                     document.editor.commit_group();
+                }
+                if let Some(warning) = load_info.editorconfig_warning {
+                    self.message = warning;
                 }
                 self.documents.push(document);
                 self.active = self.documents.len() - 1;
@@ -2982,6 +3014,109 @@ mod tests {
         assert_eq!(event_loop.message, "indent width: cancelled");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    /// TASK-260828-editorconfig-indent testcase: the indent unit layers as
+    /// palette override > .editorconfig > config.toml, per buffer. A file
+    /// matched by an .editorconfig section gets its unit; an unmatched
+    /// sibling keeps the config default; the palette toggle changes only the
+    /// active buffer and beats the .editorconfig value there.
+    #[test]
+    fn editorconfig_indent_applies_per_buffer_with_palette_override_on_top() {
+        let dir = std::env::temp_dir().join(format!(
+            "coda-test-editorconfig-loop-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("thread")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".editorconfig"),
+            "root = true\n\n[*.py]\nindent_style = tab\n",
+        )
+        .unwrap();
+        let tabbed = dir.join("a.py");
+        let plain = dir.join("b.txt");
+        std::fs::write(&tabbed, b"foo").unwrap();
+        std::fs::write(&plain, b"bar").unwrap();
+        let mut event_loop = EventLoop::open_many(
+            vec![tabbed, plain],
+            Vec::new(),
+            Vec::new(),
+            ThemeChoice::Dark,
+        )
+        .unwrap();
+
+        // a.py: the matching section pins tab.
+        event_loop.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(buffer_text(&event_loop), "\tfoo");
+
+        // b.txt: no section matches, so the config.toml default applies.
+        event_loop.dispatch(EditorAction::BufferNext);
+        event_loop.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(buffer_text(&event_loop), "    bar");
+
+        // The palette toggle is buffer-local: b.txt flips to tab while a.py
+        // keeps its .editorconfig unit until its own toggle overrides it.
+        event_loop.dispatch(EditorAction::EditorToggleIndentStyle);
+        assert_eq!(event_loop.message, "indent: tab");
+        event_loop.dispatch(EditorAction::BufferPrevious);
+        event_loop.dispatch(EditorAction::EditorToggleIndentStyle);
+        assert_eq!(event_loop.message, "indent: space (width 4)");
+
+        // a.py's space override must not leak into b.txt, whose own tab
+        // override stays pinned (Codex review: prove isolation both ways).
+        // The cursor sits after the first inserted unit, so the tab lands
+        // mid-line: "    " then "\t".
+        event_loop.dispatch(EditorAction::BufferNext);
+        event_loop.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(buffer_text(&event_loop), "    \tbar");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TASK-260828-editorconfig-indent testcase (Codex review): Save As
+    /// retargets the buffer under a different .editorconfig chain, so the
+    /// layer is re-resolved from the new location.
+    #[test]
+    fn save_as_reresolves_the_editorconfig_layer_for_the_new_path() {
+        let plain_dir = std::env::temp_dir().join(format!(
+            "coda-test-saveas-plain-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("thread")
+        ));
+        let tabbed_dir = std::env::temp_dir().join(format!(
+            "coda-test-saveas-tabbed-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("thread")
+        ));
+        for dir in [&plain_dir, &tabbed_dir] {
+            let _ = std::fs::remove_dir_all(dir);
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            tabbed_dir.join(".editorconfig"),
+            "root = true\n\n[*]\nindent_style = tab\n",
+        )
+        .unwrap();
+        let origin = plain_dir.join("draft.txt");
+        std::fs::write(&origin, b"foo").unwrap();
+        let mut event_loop =
+            EventLoop::open(origin, Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+
+        event_loop.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(buffer_text(&event_loop), "    foo");
+
+        event_loop.perform_save_as(tabbed_dir.join("moved.txt"));
+        assert!(event_loop.message.starts_with("saved "));
+        // The cursor sits after the spaces, so the re-resolved tab unit
+        // lands mid-line.
+        event_loop.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(buffer_text(&event_loop), "    \tfoo");
+
+        for dir in [&plain_dir, &tabbed_dir] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

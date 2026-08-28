@@ -15,7 +15,7 @@ use crate::core::buffer::{LoadError as BufferLoadError, TextBuffer};
 /// (`Document::readonly`, `EditorContext::is_readonly`), not here.
 pub const LARGE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LoadInfo {
     pub is_new: bool,
     pub mixed_line_endings: bool,
@@ -25,6 +25,11 @@ pub struct LoadInfo {
     /// `current_mtime` by `Document::save` to detect an external change.
     /// `None` for a file that does not exist yet.
     pub mtime: Option<SystemTime>,
+    /// Broken `.editorconfig` chain notice. Filled by `Document::open` (not
+    /// `file::open`) so every open path resolves the layer and surfaces the
+    /// failure — silently dropping the settings would violate the
+    /// silent-breakage rule (TASK-260828-editorconfig-indent).
+    pub editorconfig_warning: Option<String>,
 }
 
 #[derive(Debug)]
@@ -53,6 +58,7 @@ pub fn open(path: &Path) -> Result<(TextBuffer, LoadInfo), LoadError> {
                     mixed_line_endings: info.mixed_line_endings,
                     readonly: metadata.len() > LARGE_FILE_BYTES,
                     mtime: metadata.modified().ok(),
+                    editorconfig_warning: None,
                 },
             ))
         }
@@ -63,6 +69,7 @@ pub fn open(path: &Path) -> Result<(TextBuffer, LoadInfo), LoadError> {
                 mixed_line_endings: false,
                 readonly: false,
                 mtime: None,
+                editorconfig_warning: None,
             },
         )),
         Err(error) => Err(LoadError::Io(error)),

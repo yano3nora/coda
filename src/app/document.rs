@@ -14,7 +14,7 @@ use crate::{
     highlight::HighlightCache,
 };
 
-use super::{editor_view::EditorView, file};
+use super::{editor_view::EditorView, editorconfig, file};
 
 pub struct Document {
     pub path: Option<PathBuf>,
@@ -31,6 +31,14 @@ pub struct Document {
     /// `event_loop` consults both for the keymap context
     /// (`EditorContext::is_readonly`) and its own dispatch-level guard.
     pub readonly: bool,
+    /// Indent layer resolved from the file's `.editorconfig` chain
+    /// (TASK-260828-editorconfig-indent). Refreshed by
+    /// [`Document::apply_editorconfig`] on open and on a Save As retarget.
+    pub editorconfig_indent: editorconfig::IndentOverride,
+    /// Buffer-local palette overrides (`editor.toggleIndentStyle` /
+    /// `editor.setIndentWidth`), the top priority layer. Runtime-only:
+    /// never written back to config.toml or .editorconfig.
+    pub indent_override: editorconfig::IndentOverride,
 }
 
 /// Failure modes for [`Document::save`]. Distinct from [`file::LoadError`]:
@@ -69,11 +77,28 @@ impl std::error::Error for SaveError {}
 
 impl Document {
     pub fn open(path: PathBuf) -> Result<(Self, file::LoadInfo), file::LoadError> {
-        let (buffer, load_info) = file::open(&path)?;
+        let (buffer, mut load_info) = file::open(&path)?;
         let mut document = Self::from_buffer(Some(path), buffer);
         document.saved_mtime = load_info.mtime;
         document.readonly = load_info.readonly;
+        // Resolving here (not in each caller) makes the .editorconfig layer
+        // an invariant of open: no future open path can forget it.
+        load_info.editorconfig_warning = document.apply_editorconfig();
         Ok((document, load_info))
+    }
+
+    /// Re-resolves the `.editorconfig` indent layer for the current path
+    /// (TASK-260828-editorconfig-indent). Callers surface the returned
+    /// warning (a broken .editorconfig chain) instead of dropping the
+    /// settings silently; an unnamed buffer just clears the layer.
+    pub fn apply_editorconfig(&mut self) -> Option<String> {
+        let Some(path) = self.path.as_deref() else {
+            self.editorconfig_indent = editorconfig::IndentOverride::default();
+            return None;
+        };
+        let resolution = editorconfig::resolve(path);
+        self.editorconfig_indent = resolution.indent;
+        resolution.warning
     }
 
     pub fn unnamed() -> Self {
@@ -132,6 +157,8 @@ impl Document {
             highlight_cache: HighlightCache::default(),
             saved_mtime: None,
             readonly: false,
+            editorconfig_indent: editorconfig::IndentOverride::default(),
+            indent_override: editorconfig::IndentOverride::default(),
         }
     }
 }

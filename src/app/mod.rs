@@ -5,6 +5,7 @@ mod config;
 mod default_bindings;
 mod document;
 mod editor_view;
+mod editorconfig;
 mod event_loop;
 mod file;
 mod import_cli;

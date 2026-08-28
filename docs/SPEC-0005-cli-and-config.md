@@ -87,6 +87,8 @@ wrap = false                # visual line wrap の起動時初期値。実行中
 render_whitespace = false   # tab `→` / space `·` marker 表示の起動時初期値。実行中は view.toggleWhitespace で切替 (TASK-260828)
 indent_style = "space"      # "space" | "tab"。Tab 打鍵と edit.indent が挿入する単位 (TASK-260828)
 indent_width = 4            # space 1 レベルの幅 (1〜16)。outdent が除去する先頭 space の上限にも使う
+# indent の実効値は buffer ごとに「palette の一時変更 > .editorconfig (indent_style / indent_size) > 上記 config 値」
+# の順で項目別に解決される (TASK-260828-editorconfig-indent)
 ```
 
 ### bindings.json(user binding)
