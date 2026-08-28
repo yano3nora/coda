@@ -164,6 +164,10 @@ pub struct EventLoop {
     /// `[editor] indent_style` / `indent_width` (TASK-260828): unit used by
     /// `edit.indent`/`edit.outdent` and the Tab literal-insertion path.
     indent: IndentConfig,
+    /// Whitespace markers (TASK-260828 render-whitespace). Editor-wide like
+    /// `wrap`: `view.toggleWhitespace` and `[editor] render_whitespace`
+    /// apply to every buffer.
+    render_whitespace: bool,
     /// `[keymap] sequence_timeout_ms` (SPEC-0005): pending-sequence wait
     /// before the exact match fires.
     sequence_timeout: Duration,
@@ -269,6 +273,7 @@ impl EventLoop {
             capability_detection: None,
             wrap: false,
             indent: IndentConfig::default(),
+            render_whitespace: false,
             sequence_timeout: DEFAULT_SEQUENCE_TIMEOUT,
             capability_warning: true,
             screen_size: (80, 24),
@@ -435,6 +440,12 @@ impl EventLoop {
     /// (TASK-260828).
     pub(crate) fn set_indent(&mut self, indent: IndentConfig) {
         self.indent = indent;
+    }
+
+    /// Applies the `[editor] render_whitespace` startup default from
+    /// config.toml (TASK-260828); `view.toggleWhitespace` flips it at runtime.
+    pub(crate) fn set_render_whitespace(&mut self, render_whitespace: bool) {
+        self.render_whitespace = render_whitespace;
     }
 
     /// CLI `+N` startup jump (TASK-260729): applies to the first (= active)
@@ -642,6 +653,7 @@ impl EventLoop {
         );
         let modified = document.is_modified();
         let wrap = self.wrap;
+        let render_whitespace = self.render_whitespace;
         let follow_cursor = self.follow_cursor;
         document.view.draw(
             &document.editor,
@@ -655,6 +667,7 @@ impl EventLoop {
             },
             1,
             wrap,
+            render_whitespace,
             follow_cursor,
         );
         // Which-key (backlog P1): re-resolve the pending prefix each frame so
@@ -1323,6 +1336,16 @@ impl EventLoop {
                     "wrap: on".to_string()
                 } else {
                     "wrap: off".to_string()
+                };
+            }
+            // Runtime-only, like view.toggleWrap: not written back to
+            // config.toml — the next launch reloads `render_whitespace`.
+            EditorAction::ViewToggleWhitespace => {
+                self.render_whitespace = !self.render_whitespace;
+                self.message = if self.render_whitespace {
+                    "whitespace: on".to_string()
+                } else {
+                    "whitespace: off".to_string()
                 };
             }
             // Runtime-only, like view.toggleWrap: neither indent command
@@ -2752,6 +2775,32 @@ mod tests {
         event_loop.dispatch(EditorAction::ViewToggleWrap);
         assert!(event_loop.wrap);
         assert_eq!(event_loop.message, "wrap: on");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// TASK-260828 render-whitespace testcase: `view.toggleWhitespace` flips
+    /// the editor-wide marker flag (runtime-only, like `view.toggleWrap`)
+    /// and reports the new state; `set_render_whitespace` seeds the config
+    /// default.
+    #[test]
+    fn toggle_whitespace_flips_state_and_reports_it() {
+        let path = temp_path("toggle-whitespace");
+        std::fs::write(&path, b"text").unwrap();
+        let mut event_loop =
+            EventLoop::open(path.clone(), Vec::new(), Vec::new(), ThemeChoice::Dark).unwrap();
+        assert!(!event_loop.render_whitespace, "default is off");
+
+        event_loop.dispatch(EditorAction::ViewToggleWhitespace);
+        assert!(event_loop.render_whitespace);
+        assert_eq!(event_loop.message, "whitespace: on");
+
+        event_loop.dispatch(EditorAction::ViewToggleWhitespace);
+        assert!(!event_loop.render_whitespace);
+        assert_eq!(event_loop.message, "whitespace: off");
+
+        event_loop.set_render_whitespace(true);
+        assert!(event_loop.render_whitespace);
 
         let _ = std::fs::remove_file(path);
     }

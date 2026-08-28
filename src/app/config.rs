@@ -30,6 +30,9 @@ pub struct AppConfig {
     /// `[editor] indent_style` / `indent_width` (TASK-260828): unit used by
     /// Tab insertion and `edit.indent`/`edit.outdent`.
     pub indent: IndentConfig,
+    /// Startup default for whitespace markers (`[editor] render_whitespace`,
+    /// TASK-260828). `view.toggleWhitespace` flips it at runtime.
+    pub render_whitespace: bool,
     /// `[keymap] sequence_timeout_ms`: how long a pending key sequence waits
     /// for its next chord before the exact match (if any) fires (SPEC-0002).
     pub sequence_timeout_ms: u64,
@@ -56,6 +59,7 @@ impl Default for AppConfig {
             theme: ThemeChoice::Dark,
             wrap: false,
             indent: IndentConfig::default(),
+            render_whitespace: false,
             sequence_timeout_ms: DEFAULT_SEQUENCE_TIMEOUT_MS,
             palette_key: None,
             capability_warning: true,
@@ -153,6 +157,17 @@ fn load_config_toml(path: &Path, warnings: &mut Vec<String>) -> AppConfig {
         Some(other) => {
             warnings.push(format!(
                 "{}: editor.wrap must be true or false, got {other}; using wrap = false",
+                path.display()
+            ));
+        }
+        None => {}
+    }
+
+    match editor.and_then(|editor| editor.get("render_whitespace")) {
+        Some(toml::Value::Boolean(render)) => config.render_whitespace = *render,
+        Some(other) => {
+            warnings.push(format!(
+                "{}: editor.render_whitespace must be true or false, got {other}; using render_whitespace = false",
                 path.display()
             ));
         }
@@ -314,6 +329,7 @@ theme = \"dark\"  # \"dark\" | \"light\"
 
 [editor]
 wrap = false            # visual line wrap; toggle at runtime with view.toggleWrap (alt+z)
+render_whitespace = false  # show tab/space markers; toggle at runtime with view.toggleWhitespace
 indent_style = \"space\"  # \"space\" | \"tab\"; what Tab / edit.indent inserts
 indent_width = 4        # spaces per indent level, 1-16 (also caps space removal on outdent)
 
@@ -503,6 +519,34 @@ mod tests {
         assert!(!loaded.wrap);
         assert_eq!(loaded.warnings.len(), 1);
         assert!(loaded.warnings[0].contains("editor.wrap"));
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    /// TASK-260828 render-whitespace: `[editor] render_whitespace` startup
+    /// default. A wrong type warns and falls back to false, keeping startup
+    /// alive.
+    #[test]
+    fn load_reads_render_whitespace_and_rejects_non_boolean() {
+        let temp = temp_config_dir("render-whitespace");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("config.toml"),
+            "[editor]\nrender_whitespace = true\n",
+        )
+        .unwrap();
+        let loaded = load_from_base_dir(&temp);
+        assert!(loaded.render_whitespace);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+        fs::write(
+            temp.join("config.toml"),
+            "[editor]\nrender_whitespace = \"yes\"\n",
+        )
+        .unwrap();
+        let loaded = load_from_base_dir(&temp);
+        assert!(!loaded.render_whitespace);
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings[0].contains("editor.render_whitespace"));
         fs::remove_dir_all(&temp).unwrap();
     }
 

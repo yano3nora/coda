@@ -12,6 +12,12 @@ use crate::{
 /// Marker drawn where a line is cut off by the viewport edge (wrap off).
 const TRUNCATION_MARKER: &str = "…";
 
+/// Whitespace markers (TASK-260828 render-whitespace). Each keeps its
+/// grapheme's normal display width (tab = 4 cells, space = 1) so toggling
+/// the markers never reflows the layout or moves the cursor.
+const TAB_MARKER: &str = "→   ";
+const SPACE_MARKER: &str = "·";
+
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct EditorView {
     pub top_line: usize,
@@ -75,6 +81,7 @@ impl EditorView {
         status: StatusLine<'_>,
         origin_y: u16,
         wrap: bool,
+        show_whitespace: bool,
         follow_cursor: bool,
     ) {
         let gutter = Self::gutter_width(editor);
@@ -85,9 +92,25 @@ impl EditorView {
         // of EditorView so draw never renders an off-screen cursor.
         self.prepare_viewport(editor, screen.width(), editor_rows, wrap, follow_cursor);
         if wrap {
-            self.draw_wrapped_rows(editor, screen, highlights, origin_y, gutter, editor_rows);
+            self.draw_wrapped_rows(
+                editor,
+                screen,
+                highlights,
+                origin_y,
+                gutter,
+                editor_rows,
+                show_whitespace,
+            );
         } else {
-            self.draw_unwrapped_rows(editor, screen, highlights, origin_y, gutter, editor_rows);
+            self.draw_unwrapped_rows(
+                editor,
+                screen,
+                highlights,
+                origin_y,
+                gutter,
+                editor_rows,
+                show_whitespace,
+            );
         }
 
         if screen.height() > 0 {
@@ -123,6 +146,7 @@ impl EditorView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_unwrapped_rows(
         &self,
         editor: &EditorCore,
@@ -131,6 +155,7 @@ impl EditorView {
         origin_y: u16,
         gutter: usize,
         editor_rows: usize,
+        show_whitespace: bool,
     ) {
         let editor_cols = (screen.width() as usize).saturating_sub(gutter);
         for row in 0..editor_rows {
@@ -149,11 +174,13 @@ impl EditorView {
                 self.left_col,
                 editor.selection.map(|selection| selection.range()),
                 highlights.get(row).map(Vec::as_slice).unwrap_or(&[]),
+                show_whitespace,
             );
             draw_truncation_markers(screen, line, y, gutter, self.left_col, editor_cols);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_wrapped_rows(
         &self,
         editor: &EditorCore,
@@ -162,6 +189,7 @@ impl EditorView {
         origin_y: u16,
         gutter: usize,
         editor_rows: usize,
+        show_whitespace: bool,
     ) {
         let editor_cols = (screen.width() as usize).saturating_sub(gutter);
         let selection = editor.selection.map(|selection| selection.range());
@@ -192,6 +220,7 @@ impl EditorView {
                         .get(line_index - self.top_line)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]),
+                    show_whitespace,
                 );
                 row += 1;
                 segment_index += 1;
@@ -547,17 +576,39 @@ fn draw_line(
     left_col: usize,
     selection: Option<(Position, Position)>,
     highlights: &[HighlightSpan],
+    show_whitespace: bool,
 ) {
     let mut display_col = 0;
     for (grapheme_index, grapheme) in line.graphemes(true).enumerate() {
-        let expanded = if grapheme == "\t" { "    " } else { grapheme };
+        let (expanded, whitespace_marker) = expand_grapheme(grapheme, show_whitespace);
         let width = UnicodeWidthStr::width(expanded).max(1);
         let next_col = display_col + width;
         if next_col > left_col {
-            let style =
-                style_for_grapheme(selection, highlights, line_index, grapheme_index, grapheme);
+            let style = style_for_grapheme(
+                selection,
+                highlights,
+                line_index,
+                grapheme_index,
+                grapheme,
+                whitespace_marker,
+            );
+            // A tab straddling the left edge draws only its visible cells:
+            // its expansion is one char per cell, so clip the hidden left
+            // part instead of painting all 4 cells (which would bleed the
+            // tab's style past the line content at the right end).
+            let hidden = left_col.saturating_sub(display_col);
+            let visible = if hidden > 0 && grapheme == "\t" {
+                let byte = expanded
+                    .char_indices()
+                    .nth(hidden)
+                    .map(|(index, _)| index)
+                    .unwrap_or(expanded.len());
+                &expanded[byte..]
+            } else {
+                expanded
+            };
             let x = origin_x + display_col.saturating_sub(left_col) as u16;
-            screen.put_str(x, row, expanded, style);
+            screen.put_str(x, row, visible, style);
         }
         display_col = next_col;
         if origin_x as usize + display_col.saturating_sub(left_col) >= usize::from(screen.width()) {
@@ -580,6 +631,7 @@ fn draw_segment(
     end: usize,
     selection: Option<(Position, Position)>,
     highlights: &[HighlightSpan],
+    show_whitespace: bool,
 ) {
     let mut x = usize::from(origin_x);
     for (grapheme_index, grapheme) in line
@@ -588,8 +640,15 @@ fn draw_segment(
         .skip(start)
         .take(end.saturating_sub(start))
     {
-        let expanded = if grapheme == "\t" { "    " } else { grapheme };
-        let style = style_for_grapheme(selection, highlights, line_index, grapheme_index, grapheme);
+        let (expanded, whitespace_marker) = expand_grapheme(grapheme, show_whitespace);
+        let style = style_for_grapheme(
+            selection,
+            highlights,
+            line_index,
+            grapheme_index,
+            grapheme,
+            whitespace_marker,
+        );
         screen.put_str(x as u16, row, expanded, style);
         x += grapheme_display_width(grapheme);
         if x >= usize::from(screen.width()) {
@@ -624,14 +683,35 @@ fn draw_truncation_markers(
     }
 }
 
+/// Cell text for one grapheme, and whether it is a whitespace marker.
+/// Markers replace tab/space glyphs at their normal display width.
+fn expand_grapheme(grapheme: &str, show_whitespace: bool) -> (&str, bool) {
+    match grapheme {
+        "\t" if show_whitespace => (TAB_MARKER, true),
+        "\t" => ("    ", false),
+        " " if show_whitespace => (SPACE_MARKER, true),
+        _ => (grapheme, false),
+    }
+}
+
 fn style_for_grapheme(
     selection: Option<(Position, Position)>,
     highlights: &[HighlightSpan],
     line_index: usize,
     grapheme_index: usize,
     grapheme: &str,
+    whitespace_marker: bool,
 ) -> Style {
-    if is_selected(selection, line_index, grapheme_index) {
+    let selected = is_selected(selection, line_index, grapheme_index);
+    // Markers stay dim even inside a selection (reverse + dim) and never
+    // take syntax colors, so they read as annotations, not content.
+    if whitespace_marker {
+        Style {
+            reverse: selected,
+            dim: true,
+            fg: None,
+        }
+    } else if selected {
         Style {
             reverse: true,
             dim: false,
@@ -755,6 +835,16 @@ mod tests {
     }
 
     fn draw(editor: &EditorCore, view: &mut EditorView, screen: &mut Screen, wrap: bool) {
+        draw_whitespace(editor, view, screen, wrap, false);
+    }
+
+    fn draw_whitespace(
+        editor: &EditorCore,
+        view: &mut EditorView,
+        screen: &mut Screen,
+        wrap: bool,
+        show_whitespace: bool,
+    ) {
         view.draw(
             editor,
             screen,
@@ -767,6 +857,7 @@ mod tests {
             },
             0,
             wrap,
+            show_whitespace,
             true,
         );
     }
@@ -851,6 +942,158 @@ mod tests {
         view.prepare_viewport(&editor, 20, 3, false, false);
 
         assert_eq!(view.top_line, 5);
+    }
+
+    /// TASK-260828 render-whitespace testcase: markers replace tab/space at
+    /// their normal display width (tab = 4 cells, space = 1) and draw dim,
+    /// while non-whitespace graphemes keep their plain style.
+    #[test]
+    fn whitespace_markers_render_dim_at_unchanged_widths() {
+        let (editor, mut view) = view_with("a\tb c\n", Position::new(0, 0));
+        let mut screen = Screen::new(12, 3);
+
+        draw_whitespace(&editor, &mut view, &mut screen, false, true);
+
+        // gutter "  1 " = 4 cells; then a, →, 3 pad cells, b, ·, c
+        assert_eq!(row_text(&screen, 0), "  1 a→   b·c");
+        let tab_marker = screen.cell(5, 0).unwrap();
+        assert_eq!(tab_marker.symbol, "→");
+        assert!(tab_marker.style.dim, "tab marker must be dim");
+        let space_marker = screen.cell(10, 0).unwrap();
+        assert_eq!(space_marker.symbol, "·");
+        assert!(space_marker.style.dim, "space marker must be dim");
+        assert!(
+            !screen.cell(4, 0).unwrap().style.dim,
+            "content graphemes stay plain"
+        );
+    }
+
+    /// TASK-260828 render-whitespace testcase: with the toggle off the
+    /// rendering is byte-for-byte the pre-feature output (tab -> 4 spaces).
+    #[test]
+    fn whitespace_off_keeps_plain_expansion() {
+        let (editor, mut view) = view_with("a\tb c\n", Position::new(0, 0));
+        let mut screen = Screen::new(12, 3);
+
+        draw(&editor, &mut view, &mut screen, false);
+
+        assert_eq!(row_text(&screen, 0), "  1 a    b c");
+    }
+
+    /// TASK-260828 render-whitespace testcase: a selected whitespace marker
+    /// keeps its glyph and dim style while also taking the selection's
+    /// reverse video, so selection stays visible over runs of whitespace.
+    #[test]
+    fn selected_whitespace_marker_combines_reverse_and_dim() {
+        let (mut editor, mut view) = view_with("a b\n", Position::new(0, 0));
+        editor.select_all();
+        let mut screen = Screen::new(12, 3);
+
+        draw_whitespace(&editor, &mut view, &mut screen, false, true);
+
+        let marker = screen.cell(5, 0).unwrap();
+        assert_eq!(marker.symbol, "·");
+        assert!(marker.style.reverse, "selection must reverse the marker");
+        assert!(marker.style.dim, "marker stays dim inside the selection");
+    }
+
+    /// TASK-260828 render-whitespace testcase: wrap mode draws segments
+    /// through the same marker expansion, tabs included.
+    #[test]
+    fn whitespace_markers_render_in_wrap_segments() {
+        // 6 text cells per row: "ab cd e" wraps as "ab cd " / "e"
+        let (editor, mut view) = view_with("ab cd e\n", Position::new(0, 0));
+        let mut screen = Screen::new(10, 4);
+
+        draw_whitespace(&editor, &mut view, &mut screen, true, true);
+
+        assert_eq!(row_text(&screen, 0), "  1 ab·cd·");
+        assert_eq!(row_text(&screen, 1), "    e");
+
+        // tab (4 cells) + "ab" fills a row; "c" wraps
+        let (editor, mut view) = view_with("\tabc\n", Position::new(0, 0));
+        let mut screen = Screen::new(10, 4);
+
+        draw_whitespace(&editor, &mut view, &mut screen, true, true);
+
+        assert_eq!(row_text(&screen, 0), "  1 →   ab");
+        assert_eq!(row_text(&screen, 1), "    c");
+    }
+
+    /// Codex review (TASK-260828 render-whitespace): a tab straddling the
+    /// scrolled-off left edge must paint only its visible cells. Painting
+    /// all 4 shifted the tab's style (selection reverse included) one cell
+    /// past the line content at the right end.
+    #[test]
+    fn partially_scrolled_tab_draws_only_visible_cells() {
+        // line "\tz": tab cells 0-3, z at 4. left_col = 2 shows tab cells
+        // 2,3 at screen x 4,5 (gutter 4) and z at x 6; x 7 stays empty.
+        let (mut editor, mut view) = view_with("\tz\n", Position::new(0, 0));
+        editor.select_all();
+        view.left_col = 2;
+        let mut screen = Screen::new(10, 3);
+
+        view.draw(
+            &editor,
+            &mut screen,
+            &[],
+            StatusLine {
+                filename: "test",
+                modified: false,
+                message: "",
+                pending: "",
+            },
+            0,
+            false,
+            true,
+            false, // keep the manually scrolled left_col
+        );
+
+        assert_eq!(screen.cell(6, 0).unwrap().symbol, "z");
+        assert!(
+            !screen.cell(4, 0).unwrap().symbol.contains('→'),
+            "the arrow cell is scrolled out; only pad cells remain"
+        );
+        let past_content = screen.cell(7, 0).unwrap();
+        assert!(
+            !past_content.style.reverse,
+            "selection style must not bleed past the line content"
+        );
+    }
+
+    /// TASK-260828 render-whitespace testcase: markers never take syntax
+    /// colors — they stay dim annotations while content keeps its span color.
+    #[test]
+    fn whitespace_markers_ignore_syntax_highlight_colors() {
+        let (editor, mut view) = view_with("a b\n", Position::new(0, 0));
+        let mut screen = Screen::new(10, 3);
+        let highlights = vec![vec![(0..3, (200, 10, 10))]];
+
+        view.draw(
+            &editor,
+            &mut screen,
+            &highlights,
+            StatusLine {
+                filename: "test",
+                modified: false,
+                message: "",
+                pending: "",
+            },
+            0,
+            false,
+            true,
+            true,
+        );
+
+        assert_eq!(
+            screen.cell(4, 0).unwrap().style.fg,
+            Some((200, 10, 10)),
+            "content keeps its span color"
+        );
+        let marker = screen.cell(5, 0).unwrap();
+        assert_eq!(marker.symbol, "·");
+        assert_eq!(marker.style.fg, None);
+        assert!(marker.style.dim);
     }
 
     /// TASK-260711-18 testcase: the truncation marker appears only when the

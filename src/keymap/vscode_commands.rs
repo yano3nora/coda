@@ -49,6 +49,7 @@ pub fn action_for_vscode_command(command: &str) -> Option<EditorAction> {
         "workbench.action.files.save" => EditorAction::FileSave,
         "workbench.action.files.saveAs" => EditorAction::FileSaveAs,
         "editor.action.toggleWordWrap" => EditorAction::ViewToggleWrap,
+        "editor.action.toggleRenderWhitespace" => EditorAction::ViewToggleWhitespace,
         _ => return None,
     };
     Some(action)

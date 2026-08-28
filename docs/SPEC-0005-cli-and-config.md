@@ -84,6 +84,7 @@ theme = "dark"              # 同梱 theme: "dark" | "light" (ADR-0006)
 
 [editor]
 wrap = false                # visual line wrap の起動時初期値。実行中は view.toggleWrap (alt+z) で切替 (TASK-260711-18)
+render_whitespace = false   # tab `→` / space `·` marker 表示の起動時初期値。実行中は view.toggleWhitespace で切替 (TASK-260828)
 indent_style = "space"      # "space" | "tab"。Tab 打鍵と edit.indent が挿入する単位 (TASK-260828)
 indent_width = 4            # space 1 レベルの幅 (1〜16)。outdent が除去する先頭 space の上限にも使う
 ```
