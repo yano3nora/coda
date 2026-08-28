@@ -11,8 +11,5 @@
 4. ADR, SPEC の Open Questions と重複する項目は、決着時に ADR, SPEC 側も更新すること
 
 ## Backlogs
-- [ ] 他 editor profile import（Zed / Sublime / JetBrains）
-- [ ] (着手前に要検討) tree-sitter への highlighting engine 差し替え
-- [x] .editorconfig の indent 設定読み込み → [TASK-260828-editorconfig-indent](TASK-260828-editorconfig-indent.md)
-- [x] whitespace 可視化 → [TASK-260828-render-whitespace](TASK-260828-render-whitespace.md)
+- 他 editor profile import（Zed / Sublime / JetBrains）
 
