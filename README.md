@@ -149,6 +149,9 @@ theme = "dark"                # "dark" | "light"
 
 [editor]
 wrap = false                  # visual line wrap at startup (toggle with alt+z)
+render_whitespace = false     # show tab/space markers (toggle with view.toggleWhitespace)
+indent_style = "space"        # "space" | "tab"; what Tab / edit.indent inserts
+indent_width = 4              # spaces per indent level, 1-16
 
 [keymap]
 sequence_timeout_ms = 800     # wait time for key sequences
@@ -158,6 +161,8 @@ ctrl_c = "copy"               # set to "quit" to exit with Ctrl+C (with unsaved-
 [terminal]
 capability_warning = true     # legacy terminal warning at startup
 ```
+
+Indent settings follow the buffer's `.editorconfig` when present (`indent_style` / `indent_size`), and can be changed per buffer from the palette (`editor.toggleIndentStyle` / `editor.setIndentWidth`). Precedence: palette override > `.editorconfig` > `config.toml`.
 
 ```jsonc
 // bindings.json example (JSONC allowed)
