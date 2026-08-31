@@ -210,6 +210,34 @@ mod tests {
     }
 
     #[test]
+    fn markdown_fenced_code_blocks_embed_language_highlighting() {
+        let engine = HighlightEngine::new(ThemeChoice::Dark);
+        let syntax = engine.syntax_for_path(Path::new("note.md"));
+        let mut cache = HighlightCache::default();
+        let text = "# title\n\nplain text\n\n```sh\nif true; then echo \"hi\"; fi\n```\n\n```rust\nfn main() { let x = 1; }\n```\n";
+        let buffer = buffer(text);
+
+        let spans = cache.spans_for(&buffer, 0..buffer.line_count(), &engine, syntax);
+
+        let distinct_colors = |line: &[super::HighlightSpan]| {
+            let mut colors: Vec<_> = line.iter().map(|(_, rgb)| *rgb).collect();
+            colors.sort_unstable();
+            colors.dedup();
+            colors.len()
+        };
+        // fence 内 (sh: line 5 / rust: line 9) は keyword や文字列で複数色になる
+        assert!(distinct_colors(&spans[5]) >= 2, "sh fence: {:?}", spans[5]);
+        assert!(
+            distinct_colors(&spans[9]) >= 2,
+            "rust fence: {:?}",
+            spans[9]
+        );
+        // fence 外の Markdown は従来どおり: 見出しは本文と異なる色、本文は単色
+        assert_eq!(distinct_colors(&spans[2]), 1, "plain: {:?}", spans[2]);
+        assert_ne!(spans[0], spans[2]);
+    }
+
+    #[test]
     fn long_lines_and_too_many_lines_are_uncolored() {
         let engine = HighlightEngine::new(ThemeChoice::Dark);
         let syntax = engine.syntax_for_path(Path::new("main.rs"));

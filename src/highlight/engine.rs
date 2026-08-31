@@ -4,8 +4,12 @@ use std::path::Path;
 
 use syntect::{
     highlighting::{Theme, ThemeSet},
-    parsing::{SyntaxReference, SyntaxSet},
+    parsing::{SyntaxDefinition, SyntaxReference, SyntaxSet},
 };
+
+/// ST 3.2 (Packages v3211) の Markdown 定義。syntect 同梱版は fenced code block
+/// への他言語 embed を持たないため、後勝ちで差し替える。
+const MARKDOWN_SYNTAX: &str = include_str!("assets/Markdown.sublime-syntax");
 
 /// User-selectable bundled theme choice.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -35,7 +39,7 @@ pub struct HighlightEngine {
 impl HighlightEngine {
     pub fn new(theme_choice: ThemeChoice) -> Self {
         Self {
-            syntax_set: SyntaxSet::load_defaults_newlines(),
+            syntax_set: load_syntax_set(),
             theme_set: ThemeSet::load_defaults(),
             theme_choice,
         }
@@ -57,6 +61,15 @@ impl HighlightEngine {
         };
         &self.theme_set.themes[name]
     }
+}
+
+fn load_syntax_set() -> SyntaxSet {
+    let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
+    // 定義が読めない場合でも起動は続行し、default の Markdown (単色 fence) に留める
+    if let Ok(markdown) = SyntaxDefinition::load_from_str(MARKDOWN_SYNTAX, true, None) {
+        builder.add(markdown);
+    }
+    builder.build()
 }
 
 #[cfg(test)]
