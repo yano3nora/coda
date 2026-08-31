@@ -25,3 +25,7 @@ run = "cargo xtask prepare"
 [tasks."release:publish"]
 description = "Push the tagged commit and create the GitHub Release via goreleaser (human-only; agents must not run this)"
 run = "cargo xtask publish"
+
+[tasks."licenses:generate"]
+description = "Regenerate THIRD-PARTY-NOTICES.md from shipped-target dependencies"
+run = "cargo xtask licenses"

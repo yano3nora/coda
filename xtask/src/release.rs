@@ -54,6 +54,9 @@ pub fn assert_tag_at_head(tag: &str) -> Result<(), String> {
 pub fn prepare(version: &str) -> Result<(), String> {
     bump_version(version)?;
     assert_cli_version(version)?;
+    // archive に同梱する THIRD-PARTY-NOTICES.md を依存の現状から再生成し、
+    // 差分があれば version bump と一緒に commit されるようにする
+    crate::licenses::generate()?;
     run(
         "mise",
         &["run", "pre-commit"],

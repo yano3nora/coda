@@ -16,6 +16,7 @@
 // repo 内でその runtime の用途がこの script の実行のみだったため cargo xtask パターンへ移植した
 // (docs/TASK-260712-release-xtask-migration.md)。
 
+mod licenses;
 mod process;
 mod release;
 mod toolchain;
@@ -27,73 +28,77 @@ use std::process::ExitCode;
 use version::is_simple_semver;
 
 enum CliCommand {
-    Prepare,
-    Publish,
-}
-
-struct Args {
-    command: CliCommand,
-    version: String,
-    publish_allowed: bool,
+    Prepare {
+        version: String,
+    },
+    Publish {
+        version: String,
+        publish_allowed: bool,
+    },
+    Licenses,
 }
 
 fn usage() -> String {
     format!(
         "Usage:\n  \
          cargo xtask prepare <version>\n  \
-         cargo xtask publish <version> {flag}\n\n\
+         cargo xtask publish <version> {flag}\n  \
+         cargo xtask licenses\n\n\
          Examples:\n  \
          mise run release:prepare -- 0.1.0\n  \
-         mise run release:publish -- 0.1.0 {flag}\n",
+         mise run release:publish -- 0.1.0 {flag}\n  \
+         mise run licenses:generate\n",
         flag = PUBLISH_FLAG
     )
 }
 
-fn parse_args(raw: &[String]) -> Result<Args, String> {
-    let command = match raw.first().map(String::as_str) {
-        Some("prepare") => CliCommand::Prepare,
-        Some("publish") => CliCommand::Publish,
-        _ => return Err(format!("Unknown command.\n\n{}", usage())),
-    };
-
-    // version は第 2 引数、なければ env CODA_RELEASE_VERSION を fallback
+// prepare / publish 用。version は第 2 引数、なければ env CODA_RELEASE_VERSION を fallback
+fn parse_version(raw: &[String]) -> Result<String, String> {
     let version = raw
         .get(1)
         .cloned()
         .or_else(|| env::var("CODA_RELEASE_VERSION").ok());
-    let version = match version {
-        Some(v) if is_simple_semver(&v) => v,
-        _ => {
-            return Err(format!(
-                "Release version must be semver-like, for example 0.1.0.\n\n{}",
-                usage()
-            ));
-        }
-    };
+    match version {
+        Some(v) if is_simple_semver(&v) => Ok(v),
+        _ => Err(format!(
+            "Release version must be semver-like, for example 0.1.0.\n\n{}",
+            usage()
+        )),
+    }
+}
 
-    let publish_allowed = raw.iter().skip(2).any(|arg| arg == PUBLISH_FLAG);
-
-    Ok(Args {
-        command,
-        version,
-        publish_allowed,
-    })
+fn parse_args(raw: &[String]) -> Result<CliCommand, String> {
+    match raw.first().map(String::as_str) {
+        Some("prepare") => Ok(CliCommand::Prepare {
+            version: parse_version(raw)?,
+        }),
+        Some("publish") => Ok(CliCommand::Publish {
+            version: parse_version(raw)?,
+            publish_allowed: raw.iter().skip(2).any(|arg| arg == PUBLISH_FLAG),
+        }),
+        Some("licenses") => Ok(CliCommand::Licenses),
+        _ => Err(format!("Unknown command.\n\n{}", usage())),
+    }
 }
 
 fn main() -> ExitCode {
     let raw_args: Vec<String> = env::args().skip(1).collect();
 
-    let args = match parse_args(&raw_args) {
-        Ok(args) => args,
+    let command = match parse_args(&raw_args) {
+        Ok(command) => command,
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::FAILURE;
         }
     };
 
-    let result = match args.command {
-        CliCommand::Prepare => release::prepare(&args.version),
-        CliCommand::Publish => release::publish(&args.version, args.publish_allowed),
+    let result = match command {
+        CliCommand::Prepare { version } => release::prepare(&version),
+        CliCommand::Publish {
+            version,
+            publish_allowed,
+        } => release::publish(&version, publish_allowed),
+        CliCommand::Licenses => licenses::generate(),
     };
 
     if let Err(message) = result {

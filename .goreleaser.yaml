@@ -60,9 +60,11 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
-    # archive にはバイナリのみ含める (README 等を同梱しない)。展開直下に coda が置かれる形
+    # バイナリ + ライセンス関連のみ含める (README 等は同梱しない)。展開直下に coda が置かれる形。
+    # mise の GitHub backend は展開後に実行ファイルを探すため、同梱ファイルが増えても影響しない
     files:
-      - none*
+      - LICENSE
+      - THIRD-PARTY-NOTICES.md
 
 checksum:
   algorithm: sha256
