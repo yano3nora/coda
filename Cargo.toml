@@ -9,6 +9,7 @@ members = ["xtask"]
 name = "coda"
 version = "0.6.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 ec4rs = "1.2.0"
