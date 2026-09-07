@@ -12,4 +12,5 @@
 
 ## Backlogs
 - 他 editor profile import（Zed / Sublime / JetBrains）
+- syntax highlight 言語の追加候補 (ADR-0006 決定 7 の基準で要否を判断。出典は bat の `assets/syntaxes/02_Extra` が参考になる): nginx / systemd unit / ssh_config / `.env` / HCL (Terraform) / Nix / Kotlin / Swift / SCSS・Less / Vue・Svelte / GraphQL / Protobuf / PowerShell / JSONC (`tsconfig.json` 等)。TASK-260907 で TOML / INI / Dockerfile / git 系 / TypeScript は対応済み
 

@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn cache_recalculates_from_first_changed_line_only() {
         let engine = HighlightEngine::new(ThemeChoice::Dark);
-        let syntax = engine.syntax_for_path(Path::new("main.rs"));
+        let syntax = engine.syntax_for_file(Path::new("main.rs"), None);
         let mut cache = HighlightCache::default();
         let original = buffer("fn a() {}\nfn b() {}\nfn c() {}\n");
 
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn spans_are_returned_as_grapheme_ranges_for_japanese_text() {
         let engine = HighlightEngine::new(ThemeChoice::Dark);
-        let syntax = engine.syntax_for_path(Path::new("main.rs"));
+        let syntax = engine.syntax_for_file(Path::new("main.rs"), None);
         let mut cache = HighlightCache::default();
         let buffer = buffer("// 日本語\n");
 
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn markdown_fenced_code_blocks_embed_language_highlighting() {
         let engine = HighlightEngine::new(ThemeChoice::Dark);
-        let syntax = engine.syntax_for_path(Path::new("note.md"));
+        let syntax = engine.syntax_for_file(Path::new("note.md"), None);
         let mut cache = HighlightCache::default();
         let text = "# title\n\nplain text\n\n```sh\nif true; then echo \"hi\"; fi\n```\n\n```rust\nfn main() { let x = 1; }\n```\n";
         let buffer = buffer(text);
@@ -238,9 +238,51 @@ mod tests {
     }
 
     #[test]
+    fn bundled_extra_syntaxes_produce_multiple_colors() {
+        let engine = HighlightEngine::new(ThemeChoice::Dark);
+        let cases: &[(&str, &str)] = &[
+            (
+                "app.ts",
+                "export function f(a: string): number { return 1; }\n",
+            ),
+            (
+                "app.tsx",
+                "const view = <div className=\"x\">{label}</div>;\n",
+            ),
+            (
+                "config.toml",
+                "[package]\nname = \"coda\"\nedition = 2024\n",
+            ),
+            ("php.ini", "[section]\nkey = value ; note\n"),
+            ("Dockerfile", "FROM ubuntu:24.04\nRUN apt-get update\n"),
+            (
+                "COMMIT_EDITMSG",
+                "feat: subject\n\n# Please enter the commit message\n",
+            ),
+            (
+                "git-rebase-todo",
+                "pick 1234567 first commit\nsquash 89abcde second\n",
+            ),
+            (".gitconfig", "[user]\n\tname = coda\n"),
+            (".gitignore", "# build output\n/target\n"),
+        ];
+        for (path, text) in cases {
+            let syntax = engine.syntax_for_file(Path::new(path), None);
+            assert!(syntax.is_some(), "no syntax for {path}");
+            let buffer = buffer(text);
+            let mut cache = HighlightCache::default();
+            let spans = cache.spans_for(&buffer, 0..buffer.line_count(), &engine, syntax);
+            let mut colors: Vec<_> = spans.iter().flatten().map(|(_, rgb)| *rgb).collect();
+            colors.sort_unstable();
+            colors.dedup();
+            assert!(colors.len() >= 2, "{path}: {spans:?}");
+        }
+    }
+
+    #[test]
     fn long_lines_and_too_many_lines_are_uncolored() {
         let engine = HighlightEngine::new(ThemeChoice::Dark);
-        let syntax = engine.syntax_for_path(Path::new("main.rs"));
+        let syntax = engine.syntax_for_file(Path::new("main.rs"), None);
         let mut cache = HighlightCache::default();
         let long = format!("{}\n", "a".repeat(MAX_HIGHLIGHT_LINE_BYTES + 1));
         let long_buffer = buffer(&long);

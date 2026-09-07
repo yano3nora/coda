@@ -658,9 +658,10 @@ impl EventLoop {
             );
         }
         let path = self.documents[active].path.clone();
+        let first_line = self.documents[active].editor.buffer.line(0);
         let syntax = path
             .as_deref()
-            .and_then(|path| self.highlight_engine.syntax_for_path(path));
+            .and_then(|path| self.highlight_engine.syntax_for_file(path, first_line));
         let document = &mut self.documents[active];
         let highlights = document.highlight_cache.spans_for(
             &document.editor.buffer,

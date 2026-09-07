@@ -1,9 +1,15 @@
-Markdown.sublime-syntax in this directory is taken from:
+The following files in this directory are taken from
+https://github.com/sublimehq/Packages (tag: v3211):
 
-    https://github.com/sublimehq/Packages (tag: v3211)
-    Markdown/Markdown.sublime-syntax
+    Markdown.sublime-syntax       Markdown/Markdown.sublime-syntax
+    GitAttributes.sublime-syntax  Git Formats/Git Attributes.sublime-syntax
+    GitCommit.sublime-syntax      Git Formats/Git Commit.sublime-syntax
+    GitCommon.sublime-syntax      Git Formats/Git Common.sublime-syntax
+    GitConfig.sublime-syntax      Git Formats/Git Config.sublime-syntax
+    GitIgnore.sublime-syntax      Git Formats/Git Ignore.sublime-syntax
+    GitRebase.sublime-syntax      Git Formats/Git Rebase.sublime-syntax
 
-It is distributed under the following license (from the repository's LICENSE):
+They are distributed under the following license (from the repository's LICENSE):
 
     Permission to copy, use, modify, sell and distribute this
     software is granted. This software is provided "as is" without

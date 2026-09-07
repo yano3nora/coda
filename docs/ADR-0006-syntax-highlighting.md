@@ -48,6 +48,16 @@ keyboard capability(ADR-0003)と同じ思想で扱う。
 
 keybinding engine(ADR-0004 step 1〜9)を遅らせない。find / replace の後、multi-buffer tabs / split view の前に組み込む。
 
+### 7. 言語定義は「terminal で短時間編集するファイル」を基準に同梱する (2026-09-07 追記)
+
+syntect の default set には TypeScript / TOML / Dockerfile / git 系など主戦場の定義が無い (TASK-260907)。「数百言語が同梱で手に入る」は誤りだったので、次の基準で `src/highlight/assets/` に定義を足す。
+
+- 追加する: 設定ファイル・git 作業・コンテナ・SSH 先の dotfile など、ADR-0001 の用途で開く頻度が高いもの
+- 追加しない: 「あると嬉しい」だけの言語。全言語対応は目指さない (バイナリサイズと出典管理のコスト)
+- 定義は既存の `.sublime-syntax` を出典・ライセンス付きで流用し、自作しない (原則 1 と同じ)
+- parse / link は build.rs で済ませ、実行時は dump を読むだけにする。実行時 YAML parse は TypeScript 1 本で約 0.7 秒かかり、起動を壊す
+- 判定は file 名 → 拡張子 → 1 行目の順。`Makefile` / `.bashrc` / `COMMIT_EDITMSG` は file 名で決まる
+
 ## Alternatives Considered
 
 - **MVP では highlighting なし(初期案)**: 第一印象での離脱により import 体験まで到達しない採用リスクが大きい。不採用。
@@ -59,7 +69,7 @@ keybinding engine(ADR-0004 step 1〜9)を遅らせない。find / replace の後
 ### 良くなること
 
 - GUI editor 派への第一印象が「普通のエディタ」になり、核機能の体験まで到達する
-- 数百言語の定義が同梱で手に入り、言語対応の保守を負わない
+- 主要言語の定義が同梱で手に入り、言語対応の保守は「定義ファイルの追加」に留まる (決定 7)
 - capability 検出 → 明示的 degrade の設計思想が keyboard / color で一貫する
 
 ### リスク・コスト
@@ -81,3 +91,4 @@ SPEC-0001(deferred から MVP へ移動)、ADR-0004(module / 実装順序)、SPE
 ## Progress
 
 - 2026-07-05: 初版作成(Proposed)。deferred 判断を覆して MVP scope に含める決定。
+- 2026-09-07: 決定 7 を追記。default set に無い言語 (TypeScript / TOML / Dockerfile / git 系 / INI) を同梱し、build-time dump と file 名・1 行目判定を導入 (TASK-260907)。

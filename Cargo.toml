@@ -15,10 +15,25 @@ license = "MIT"
 ec4rs = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+# syntax 定義は build.rs が dump 済みにするため、実行時は dump-load と theme だけで足りる
+syntect = { version = "5.3.0", default-features = false, features = [
+    "parsing",
+    "default-themes",
+    "dump-load",
+    "regex-fancy",
+] }
 toml = "1.1.2"
 unicode-segmentation = "1"
 unicode-width = "0.2"
+
+# build.rs で assets/*.sublime-syntax を parse して dump する側。default-syntaxes は base の default set 用
+[build-dependencies]
+syntect = { version = "5.3.0", default-features = false, features = [
+    "default-syntaxes",
+    "yaml-load",
+    "dump-create",
+    "regex-fancy",
+] }
 
 # terminal 依存は platform ごとに分離する (docs/TASK-260713-windows-minimal-distribution.md)。
 # unix: termios / poll / signal を libc で。windows: Console API を windows-sys で

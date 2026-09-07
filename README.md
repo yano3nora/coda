@@ -16,7 +16,7 @@ coda
 - Command palette (`F1` is a rescue entry point that always works, even with a broken config)
 - Editing basics: undo/redo (with grouping), find/replace, multiple buffers/tabs, line numbers, grapheme-aware Unicode handling (CJK, emoji)
 - Mouse support: click to move the cursor, drag to select, wheel to scroll (SGR). In most terminals **Shift+drag is left to the terminal's own selection** instead of being sent to the app. In terminals that do send Shift-modified SGR events, coda ignores them, but cannot hand them back to the terminal selection
-- Syntax highlighting (syntect, dark/light themes, display-only)
+- Syntax highlighting (syntect, dark/light themes, display-only). On top of syntect's bundled languages, coda ships definitions for TypeScript/TSX, TOML, INI, Dockerfile and git files (commit message, rebase todo, config, ignore, attributes). Files without an extension (`Makefile`, `.bashrc`, `COMMIT_EDITMSG`) and shebang scripts are detected by name or first line
 - Clipboard: OSC 52 write (copy from an SSH session to your local OS clipboard) + bracketed paste
 - Input self-diagnosis: `coda inspect-key` (raw input inspector) and `coda keymap verify` (interactively checks whether imported bindings actually reach the app)
 

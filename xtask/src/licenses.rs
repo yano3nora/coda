@@ -20,7 +20,13 @@ const SHIPPED_TARGETS: &[&str] = &[
 ];
 
 // 同梱アセット (Rust 依存以外) の notice。生成物へそのまま転記する
-const BUNDLED_ASSET_NOTICES: &[&str] = &["src/highlight/assets/LICENSE-sublimehq-packages.txt"];
+const BUNDLED_ASSET_NOTICES: &[&str] = &[
+    "src/highlight/assets/LICENSE-sublimehq-packages.txt",
+    "src/highlight/assets/LICENSE-typescript-sublime-plugin.txt",
+    "src/highlight/assets/LICENSE-sublime-toml-highlighting.txt",
+    "src/highlight/assets/LICENSE-ini-syntax.txt",
+    "src/highlight/assets/LICENSE-docker-tmbundle.txt",
+];
 
 // crate が本文を publish していない場合の救済用 canonical text。Apache-2.0 は §4(a) が
 // 受領者へのライセンスコピーの提供を要求するため、リンクでは代替できない
@@ -74,10 +80,11 @@ pub fn generate() -> Result<(), String> {
         }
     }
 
+    output.push_str("\n## Bundled assets\n");
     for path in BUNDLED_ASSET_NOTICES {
         let notice = fs::read_to_string(path)
             .map_err(|err| format!("failed to read bundled asset notice {path}: {err}"))?;
-        output.push_str("\n## Bundled assets\n\n```text\n");
+        output.push_str("\n```text\n");
         output.push_str(notice.trim_end());
         output.push_str("\n```\n");
     }
@@ -199,7 +206,9 @@ fn license_texts(crate_dir: &Path) -> Result<Vec<(String, String)>, String> {
         .map(|name| {
             let text = fs::read_to_string(crate_dir.join(&name))
                 .map_err(|err| format!("failed to read {}/{name}: {err}", crate_dir.display()))?;
-            Ok((name, text))
+            // CRLF の LICENSE (bincode 等) をそのまま転記すると生成物が混在改行になり、
+            // git の text=auto 正規化で毎回 warning が出るため LF に揃える
+            Ok((name, text.replace("\r\n", "\n")))
         })
         .collect()
 }
