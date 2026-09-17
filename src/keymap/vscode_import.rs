@@ -6,8 +6,11 @@ use crate::input::{Key, KeyEvent, KeyboardCapabilities, Modifiers};
 
 use super::{
     Binding, ContextPredicate, EditorAction, ImportReport, ReportEntry, Source,
-    action_for_vscode_command, context::RESERVED_FALSE_KEYS, parse_key_sequence,
-    user_bindings::strip_jsonc_comments, vscode_when::convert_vscode_when,
+    action_for_vscode_command,
+    context::RESERVED_FALSE_KEYS,
+    parse_key_sequence,
+    user_bindings::{strip_jsonc_comments, strip_trailing_commas},
+    vscode_when::convert_vscode_when,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -47,7 +50,9 @@ pub fn import_vscode_keybindings(
     capabilities: &KeyboardCapabilities,
     cmd_strategy: CmdStrategy,
 ) -> Result<VsCodeImport, VsCodeImportError> {
-    let stripped = strip_jsonc_comments(text);
+    // keybindings.json is JSONC: comments and trailing commas are both legal
+    // in VS Code, so strip them the same way bindings.json does.
+    let stripped = strip_trailing_commas(&strip_jsonc_comments(text));
     let value: Value = serde_json::from_str(&stripped)
         .map_err(|error| VsCodeImportError::InvalidJson(error.to_string()))?;
     let entries = value.as_array().ok_or(VsCodeImportError::RootNotArray)?;
@@ -672,6 +677,24 @@ mod tests {
         for entry in &imported.report.ignored {
             assert_eq!(entry.reason, "outside editor scope");
         }
+    }
+
+    /// bindings.json 側 (TASK-260820) と同じ JSONC 前処理を importer でも通す。
+    #[test]
+    fn accepts_jsonc_comments_and_trailing_commas_like_vscode() {
+        let fixture = r#"[
+            // Pasted verbatim from VS Code, trailing commas included.
+            { "key": "ctrl+j", "command": "cursorDown", "when": "editorFocus", },
+            /* block comment */
+            { "key": "ctrl+k", "command": "cursorUp", }, // comment between comma and bracket
+        ]"#;
+
+        let imported =
+            import_vscode_keybindings(fixture, &KeyboardCapabilities::modern(), CmdStrategy::Keep)
+                .expect("trailing commas must parse like VS Code");
+
+        assert_eq!(imported.bindings.len(), 2);
+        assert_eq!(imported.report.summary().imported, 2);
     }
 
     #[test]
